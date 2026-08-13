@@ -9,6 +9,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tomllib
 import zipfile
 from email.parser import BytesParser
 from email.policy import default
@@ -18,8 +19,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 VERIFIER = ROOT / "scripts" / "verify_release_artifacts.py"
-WHEEL_NAME = "trueheart_core-0.1.0-py3-none-any.whl"
-SDIST_NAME = "trueheart_core-0.1.0.tar.gz"
+WHEEL_NAME = "trueheart_core-0.1.1-py3-none-any.whl"
+SDIST_NAME = "trueheart_core-0.1.1.tar.gz"
 EXPECTED_DEV_REQUIREMENTS = (
     'build<2,>=1.2; extra == "dev"',
     'mypy<2,>=1.15; extra == "dev"',
@@ -39,7 +40,7 @@ requires = ["setuptools==84.0.0"]
 build-backend = "setuptools.build_meta"
 """
 EXPECTED_PACKAGED_README_LINKS = {
-    "https://pypi.org/project/trueheart-core/0.1.0/",
+    "https://pypi.org/project/trueheart-core/0.1.1/",
     "https://github.com/qingyou0420/trueheart-openai-agents-example",
     "https://github.com/qingyou0420/trueheart-core/blob/main/examples/basic_memory.py",
     "https://github.com/qingyou0420/trueheart-core/blob/main/docs/architecture.md",
@@ -67,7 +68,7 @@ def _workflow_job_blocks(workflow: str) -> dict[str, str]:
 
 def _metadata(
     *,
-    version: str = "0.1.0",
+    version: str = "0.1.1",
     license_expression: str | None = "MIT",
     requires_python: str = ">=3.11",
     requires_dist: tuple[str, ...] = EXPECTED_DEV_REQUIREMENTS,
@@ -110,10 +111,11 @@ def _write_wheel(
     valid_record: bool = True,
     extra_member: str | None = None,
     extra_member_mode: int | None = None,
+    include_py_typed: bool = True,
 ) -> None:
-    dist_info = "trueheart_core-0.1.0.dist-info"
+    dist_info = "trueheart_core-0.1.1.dist-info"
     files = {
-        "trueheart_core/__init__.py": b'__version__ = "0.1.0"\n',
+        "trueheart_core/__init__.py": b'__version__ = "0.1.1"\n',
         f"{dist_info}/METADATA": metadata,
         f"{dist_info}/WHEEL": (
             b"Wheel-Version: 1.0\n"
@@ -122,6 +124,8 @@ def _write_wheel(
             b"Tag: py3-none-any\n"
         ),
     }
+    if include_py_typed:
+        files["trueheart_core/py.typed"] = b""
     if extra_member is not None:
         files[extra_member] = b"unsafe\n"
     record_buffer = io.StringIO(newline="")
@@ -159,12 +163,15 @@ def _write_sdist(
     pyproject: bytes | None = SDIST_PYPROJECT,
     extra_members: tuple[str, ...] = (),
     link_member: str | None = None,
+    include_py_typed: bool = True,
 ) -> None:
     with tarfile.open(path, "w:gz") as archive:
-        root = "trueheart_core-0.1.0"
+        root = "trueheart_core-0.1.1"
         _add_tar_bytes(archive, f"{root}/PKG-INFO", metadata)
         if pyproject is not None:
             _add_tar_bytes(archive, f"{root}/pyproject.toml", pyproject)
+        if include_py_typed:
+            _add_tar_bytes(archive, f"{root}/src/trueheart_core/py.typed", b"")
         for member_name in extra_members:
             _add_tar_bytes(archive, member_name, b"unsafe\n")
         if link_member is not None:
@@ -177,7 +184,7 @@ def _write_sdist(
 def _create_artifacts(
     directory: Path,
     *,
-    version: str = "0.1.0",
+    version: str = "0.1.1",
     license_expression: str | None = "MIT",
     requires_python: str = ">=3.11",
     requires_dist: tuple[str, ...] = EXPECTED_DEV_REQUIREMENTS,
@@ -195,6 +202,8 @@ def _create_artifacts(
     wheel_metadata: bytes | None = None,
     sdist_metadata: bytes | None = None,
     valid_record: bool = True,
+    wheel_py_typed: bool = True,
+    sdist_py_typed: bool = True,
 ) -> Path:
     dist = directory / "dist"
     dist.mkdir()
@@ -210,14 +219,15 @@ def _create_artifacts(
         extra_headers=extra_headers,
         omit_fields=omit_fields,
     )
-    wheel_name = WHEEL_NAME.replace("0.1.0", version)
-    sdist_name = SDIST_NAME.replace("0.1.0", version)
+    wheel_name = WHEEL_NAME.replace("0.1.1", version)
+    sdist_name = SDIST_NAME.replace("0.1.1", version)
     _write_wheel(
         dist / wheel_name,
         metadata if wheel_metadata is None else wheel_metadata,
         valid_record=valid_record,
         extra_member=wheel_member,
         extra_member_mode=wheel_member_mode,
+        include_py_typed=wheel_py_typed,
     )
     _write_sdist(
         dist / sdist_name,
@@ -225,6 +235,7 @@ def _create_artifacts(
         pyproject=sdist_pyproject,
         extra_members=sdist_members,
         link_member=sdist_link,
+        include_py_typed=sdist_py_typed,
     )
     return dist
 
@@ -249,10 +260,10 @@ def _packaged_readme_payloads(directory: Path) -> dict[str, str]:
     dist = _create_artifacts(directory, payload=readme)
     with zipfile.ZipFile(dist / WHEEL_NAME) as wheel:
         wheel_metadata = BytesParser(policy=default).parsebytes(
-            wheel.read("trueheart_core-0.1.0.dist-info/METADATA")
+            wheel.read("trueheart_core-0.1.1.dist-info/METADATA")
         )
     with tarfile.open(dist / SDIST_NAME, mode="r:gz") as sdist:
-        pkg_info = sdist.extractfile("trueheart_core-0.1.0/PKG-INFO")
+        pkg_info = sdist.extractfile("trueheart_core-0.1.1/PKG-INFO")
         assert pkg_info is not None
         sdist_metadata = BytesParser(policy=default).parsebytes(pkg_info.read())
 
@@ -294,7 +305,7 @@ def test_verifier_rejects_a_release_without_an_sdist(tmp_path: Path) -> None:
 
 def test_verifier_rejects_an_extra_distribution(tmp_path: Path) -> None:
     dist = _create_artifacts(tmp_path)
-    (dist / "trueheart_core-0.1.0.zip").write_bytes(b"extra")
+    (dist / "trueheart_core-0.1.1.zip").write_bytes(b"extra")
 
     result = _run_verifier(tmp_path)
 
@@ -349,8 +360,8 @@ def test_verifier_rejects_a_non_regular_wheel_member(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "member_name",
     [
-        "trueheart_core-0.1.0/./alias.txt",
-        "trueheart_core-0.1.0\\..\\escaped.txt",
+        "trueheart_core-0.1.1/./alias.txt",
+        "trueheart_core-0.1.1\\..\\escaped.txt",
         "C:/escaped.txt",
         "//server/share/escaped.txt",
     ],
@@ -368,7 +379,7 @@ def test_verifier_rejects_noncanonical_sdist_member_paths(
 def test_verifier_rejects_sdist_members_with_the_same_normalized_path(
     tmp_path: Path,
 ) -> None:
-    root = "trueheart_core-0.1.0"
+    root = "trueheart_core-0.1.1"
     _create_artifacts(
         tmp_path,
         sdist_members=(f"{root}/./pyproject.toml",),
@@ -380,7 +391,7 @@ def test_verifier_rejects_sdist_members_with_the_same_normalized_path(
 
 
 def test_verifier_rejects_a_non_regular_sdist_member(tmp_path: Path) -> None:
-    member_name = "trueheart_core-0.1.0/link.py"
+    member_name = "trueheart_core-0.1.1/link.py"
     _create_artifacts(tmp_path, sdist_link=member_name)
 
     result = _run_verifier(tmp_path)
@@ -406,7 +417,7 @@ def test_verifier_rejects_missing_singleton_metadata_fields(
     ("field", "value"),
     [
         ("Name", "trueheart-core"),
-        ("Version", "0.1.0"),
+        ("Version", "0.1.1"),
         ("Requires-Python", ">=3.11"),
         ("License-Expression", "MIT"),
     ],
@@ -585,7 +596,7 @@ def test_verifier_rejects_an_sdist_without_a_pyproject(tmp_path: Path) -> None:
 
     result = _run_verifier(tmp_path)
 
-    _assert_rejected(result, "sdist is missing trueheart_core-0.1.0/pyproject.toml")
+    _assert_rejected(result, "sdist is missing trueheart_core-0.1.1/pyproject.toml")
 
 
 def test_verifier_rejects_malformed_sdist_pyproject_toml(tmp_path: Path) -> None:
@@ -640,6 +651,56 @@ def test_verifier_rejects_a_wheel_with_a_tampered_record_hash(tmp_path: Path) ->
     _assert_rejected(result, "wheel RECORD hash mismatch")
 
 
+def test_source_tree_declares_pep_561_typed_marker() -> None:
+    typed = ROOT / "src" / "trueheart_core" / "py.typed"
+    with (ROOT / "pyproject.toml").open("rb") as pyproject_file:
+        pyproject = tomllib.load(pyproject_file)
+
+    assert typed.is_file()
+    assert typed.read_bytes() == b""
+    assert pyproject["tool"]["setuptools"]["package-data"]["trueheart_core"] == [
+        "py.typed"
+    ]
+
+
+def test_verifier_rejects_a_wheel_without_py_typed(tmp_path: Path) -> None:
+    _create_artifacts(tmp_path, wheel_py_typed=False)
+
+    result = _run_verifier(tmp_path)
+
+    _assert_rejected(result, "wheel is missing trueheart_core/py.typed")
+
+
+def test_verifier_rejects_an_sdist_without_py_typed(tmp_path: Path) -> None:
+    _create_artifacts(tmp_path, sdist_py_typed=False)
+
+    result = _run_verifier(tmp_path)
+
+    _assert_rejected(
+        result,
+        "sdist is missing trueheart_core-0.1.1/src/trueheart_core/py.typed",
+    )
+
+
+def test_built_distributions_include_pep_561_typed_marker(tmp_path: Path) -> None:
+    dist = tmp_path / "dist"
+    result = subprocess.run(
+        [sys.executable, "-m", "build", "--outdir", str(dist)],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    with zipfile.ZipFile(dist / WHEEL_NAME) as wheel:
+        assert "trueheart_core/py.typed" in wheel.namelist()
+        assert wheel.read("trueheart_core/py.typed") == b""
+    with tarfile.open(dist / SDIST_NAME, mode="r:gz") as sdist:
+        names = sdist.getnames()
+    assert "trueheart_core-0.1.1/src/trueheart_core/py.typed" in names
+
+
 @pytest.mark.parametrize("artifact", ["wheel", "sdist"])
 def test_packaged_readme_records_verified_publication_and_integration(
     tmp_path: Path, artifact: str
@@ -649,7 +710,7 @@ def test_packaged_readme_records_verified_publication_and_integration(
 
     assert "not yet published" not in normalized_payload
     assert "after successful package publication" not in normalized_payload
-    assert "trueheart core 0.1.0 is available from" in normalized_payload
+    assert "trueheart core 0.1.1 is available from" in normalized_payload
 
 
 @pytest.mark.parametrize("artifact", ["wheel", "sdist"])
@@ -703,7 +764,7 @@ def test_verifier_accepts_safe_artifacts_and_writes_deterministic_checksums(
         for path in sorted(dist.iterdir(), key=lambda item: item.name)
     )
     assert (tmp_path / "SHA256SUMS").read_text(encoding="ascii") == expected
-    assert not (tmp_path / "trueheart_core-0.1.0").exists()
+    assert not (tmp_path / "trueheart_core-0.1.1").exists()
 
 
 def test_release_workflow_binds_the_tag_to_the_release_event_commit() -> None:
@@ -714,7 +775,7 @@ def test_release_workflow_binds_the_tag_to_the_release_event_commit() -> None:
     assert "ref: ${{ github.sha }}" in workflow
     assert 'fetch-depth: "0"' in workflow
     assert "EXPECTED_COMMIT: ${{ github.sha }}" in workflow
-    assert "refs/tags/v0.1.0^{commit}" in workflow
+    assert "refs/tags/v0.1.1^{commit}" in workflow
     assert workflow.index("Check out release event commit") < workflow.index(
         "Verify release tag points to event commit"
     )

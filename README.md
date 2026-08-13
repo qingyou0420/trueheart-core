@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TrueHeart Core 0.1.0 is a model-independent Python library for governed
+TrueHeart Core 0.1.1 is a model-independent Python library for governed
 long-term memory in AI agents. It gives a host application explicit contracts
 for ingesting source events, materializing derived memories, deterministic
 recall, retention, lineage, governance, and body-free audit records.
@@ -12,8 +12,10 @@ dependencies outside the standard library, and invokes no model or network.
 
 ## Guarantees
 
-- Every public operation uses an exact caller-supplied
+- Every public operation that acts on scoped data uses an exact caller-supplied
   `Scope(tenant_id, owner_id, subject_id)` and fails closed on mismatches.
+  `expire_raw_content` is a whole-database maintenance operation that only
+  expires eligible raw bodies by `as_of`.
 - Inputs are validated and bounded; public datetimes are timezone-aware and
   normalized to UTC.
 - Trust is explicit and a derived memory cannot exceed its least-trusted source.
@@ -86,11 +88,11 @@ transaction. Forgetting a memory does not delete its source events.
 
 ## Installation
 
-TrueHeart Core 0.1.0 is available from
-[PyPI](https://pypi.org/project/trueheart-core/0.1.0/):
+TrueHeart Core 0.1.1 is available from
+[PyPI](https://pypi.org/project/trueheart-core/0.1.1/):
 
 ```console
-python -m pip install trueheart-core==0.1.0
+python -m pip install trueheart-core==0.1.1
 ```
 
 For development from a checkout:
@@ -171,7 +173,7 @@ and report vulnerabilities privately as described in
 
 ## Status
 
-Version 0.1.0 is published on PyPI from this public source repository and keeps
+Version 0.1.1 is published on PyPI from this public source repository and keeps
 an intentionally small API. A point-in-time
 [code review of 0.1.0 (in Chinese)](https://github.com/qingyou0420/trueheart-core/blob/main/docs/reviews/2026-08-13-v0.1.0-code-review.md)
 covers `main` at commit `bda22c7`; it is a snapshot, not a living guarantee. Semantic search, embeddings, model integration,

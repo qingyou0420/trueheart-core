@@ -2,6 +2,19 @@
 
 All notable changes to TrueHeart Core are documented here.
 
+## [0.1.1] - 2026-08-13
+
+### Added
+
+- PEP 561 `py.typed` marker so installed wheels and sdists expose public
+  contracts to downstream type checkers.
+
+### Changed
+
+- Scope guarantee wording now matches the API: public operations that act on
+  scoped data require exact `Scope`; `expire_raw_content` is a whole-database
+  maintenance operation that only expires eligible raw bodies by `as_of`.
+
 ## [0.1.0] - 2026-08-13
 
 ### Changed

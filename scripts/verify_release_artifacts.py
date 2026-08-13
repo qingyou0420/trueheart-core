@@ -1,4 +1,4 @@
-"""Verify the exact TrueHeart Core v0.1.0 release distributions."""
+"""Verify the exact TrueHeart Core v0.1.1 release distributions."""
 
 from __future__ import annotations
 
@@ -16,10 +16,10 @@ from email.parser import BytesParser
 from email.policy import default
 from pathlib import Path
 
-WHEEL_NAME = "trueheart_core-0.1.0-py3-none-any.whl"
-SDIST_NAME = "trueheart_core-0.1.0.tar.gz"
+WHEEL_NAME = "trueheart_core-0.1.1-py3-none-any.whl"
+SDIST_NAME = "trueheart_core-0.1.1.tar.gz"
 EXPECTED_FILES = {WHEEL_NAME, SDIST_NAME}
-SDIST_ROOT = "trueheart_core-0.1.0"
+SDIST_ROOT = "trueheart_core-0.1.1"
 ALLOWED_REQUIRES_DIST = (
     'build<2,>=1.2; extra == "dev"',
     'mypy<2,>=1.15; extra == "dev"',
@@ -62,7 +62,7 @@ def _verify_metadata(metadata_bytes: bytes, source: str) -> None:
     metadata: Message = BytesParser(policy=default).parsebytes(metadata_bytes)
     expected = {
         "Name": "trueheart-core",
-        "Version": "0.1.0",
+        "Version": "0.1.1",
         "Requires-Python": ">=3.11",
         "License-Expression": "MIT",
     }
@@ -143,7 +143,7 @@ def _wheel_record_hash(content: bytes) -> str:
 
 
 def _verify_wheel(wheel_path: Path) -> None:
-    dist_info = "trueheart_core-0.1.0.dist-info"
+    dist_info = "trueheart_core-0.1.1.dist-info"
     metadata_name = f"{dist_info}/METADATA"
     record_name = f"{dist_info}/RECORD"
 
@@ -158,6 +158,8 @@ def _verify_wheel(wheel_path: Path) -> None:
             raise VerificationError(f"wheel is missing {metadata_name}")
         if record_name not in archive_names:
             raise VerificationError(f"wheel is missing {record_name}")
+        if "trueheart_core/py.typed" not in archive_names:
+            raise VerificationError("wheel is missing trueheart_core/py.typed")
 
         _verify_metadata(wheel.read(metadata_name), "wheel METADATA")
 
@@ -223,6 +225,10 @@ def _verify_sdist(sdist_path: Path) -> None:
             raise VerificationError(
                 "sdist build-system must match the exact backend pin"
             )
+
+        typed_name = f"{SDIST_ROOT}/src/trueheart_core/py.typed"
+        if typed_name not in names:
+            raise VerificationError(f"sdist is missing {typed_name}")
 
 
 def _write_checksums(paths: tuple[Path, Path], destination: Path) -> None:
