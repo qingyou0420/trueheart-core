@@ -17,11 +17,11 @@ from trueheart_core import (
 )
 
 
-def main() -> None:
+def main(*, temporary_root: Path | None = None) -> None:
     now = datetime(2026, 8, 13, 12, tzinfo=UTC)
     scope = Scope("synthetic-tenant", "synthetic-owner", "synthetic-subject")
 
-    with TemporaryDirectory() as temporary_directory:
+    with TemporaryDirectory(dir=temporary_root) as temporary_directory:
         service = TrueHeart(
             SQLiteRepository(Path(temporary_directory) / "memory.db"),
             clock=lambda: now,

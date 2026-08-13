@@ -33,10 +33,13 @@ provider content.
 
 ## Five-minute example
 
-Install the package, then run the complete synthetic example:
+Start from a repository checkout because the runnable example is a repository
+file and is not installed by the wheel:
 
 ```console
-python -m pip install trueheart-core==0.1.0
+git clone https://github.com/qingyou0420/trueheart-core.git
+cd trueheart-core
+python -m pip install -e ".[dev]"
 python examples/basic_memory.py
 ```
 
@@ -82,7 +85,8 @@ transaction. Forgetting a memory does not delete its source events.
 
 ## Installation
 
-From PyPI after release:
+PyPI installation will be available after release; this does not claim that the
+package is published yet:
 
 ```console
 python -m pip install trueheart-core==0.1.0

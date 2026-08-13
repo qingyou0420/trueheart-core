@@ -1,7 +1,5 @@
 # Security guarantees and boundaries
-scope construction, call expiry on an explicit schedule, and assess any body
-before including it in a model prompt. Maintainers own dependency and workflow
-review; contributors must use synthetic fixtures and declare provenance.
+
 This document describes TrueHeart Core 0.1.0. Guarantees apply to operations
 performed through the library against the SQLite database it controls.
 
