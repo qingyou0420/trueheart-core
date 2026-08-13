@@ -1,0 +1,25 @@
+# Threat model
+
+TrueHeart Core 0.1.0 assumes event bodies, derived memory bodies, metadata,
+identifiers, and contributions are untrusted. The local host and administrator
+are outside the trusted computing boundary. “Owner” below names the party
+responsible for the remaining decision or operation.
+
+| Threat | Control in 0.1 | Residual risk | Owner |
+| --- | --- | --- | --- |
+| Malicious or malformed event and memory bodies | Size and UTF-8 validation; content is stored as data and never executed or interpreted by the core; no model/network/shell/plugin calls | A host can place the body into a prompt, interpreter, renderer, log, or provider where it causes harm | Host application |
+| Malicious metadata | JSON-only, finite values, string keys, 16 KiB serialized limit, immutable public projection, SQLite `json_valid` constraints | Valid JSON can contain deceptive or sensitive values that a host later misuses or exposes | Host application |
+| Hostile or sensitive identifiers | Non-blank bounded strings and parameterized SQL | IDs and scope components can still carry secrets, personal data, confusing Unicode, or disclosure through errors/audit | Caller and host application |
+| Scope confusion or cross-scope access | Every operation requires exact `Scope(tenant_id, owner_id, subject_id)` and fails closed on mismatches | Scope is caller-supplied isolation, not identity proof, authentication, authorization, or a service tenancy layer | Host application |
+| Trust escalation | Typed trust levels and materialization ceiling at the least-trusted source; no automatic promotion | A caller can mislabel source trust, and trust does not establish truth | Caller and host application |
+| Memory poisoning and prompt injection | Explicit provenance and lineage; caller-authored memories; deterministic recall; the core never interprets content as instructions | The core cannot identify false/manipulative content, prevent injection, or control prompt assembly | Host application |
+| SQL injection or JSON/database corruption | Parameterized values, fixed table names, schema constraints, canonical JSON validation, exact schema-version checks, corruption errors without body disclosure | A malicious local administrator can alter database files or library code; denial of service and metadata disclosure remain possible | Host operator |
+| Missing, mixed, or corrupt lineage | Materialization verifies all sources, exact scope, deletion state, trust ceiling, and writes edges atomically; corrupt projections fail closed | The host can derive misleading content from valid sources; local tampering can make records unavailable | Caller for semantics; library for integrity checks; host operator for storage |
+| Recreation after forget/delete | Body-free tombstones block scoped IDs and exact dependency fingerprints in the controlled database | Not cryptographic erasure; renamed or changed content/fingerprints, copied databases, snapshots, backups, WAL/filesystem artifacts, logs, and provider copies remain | Host operator |
+| Leakage through host or provider | The core has no model/network path and does not render prompts | The host can transmit, cache, log, or retain bodies and metadata; provider-side deletion is outside the core | Host application and provider |
+| Plaintext files, backups, snapshots, WAL, and filesystem recovery | Governed operations remove controlled table bodies and retain only body-free tombstones/audit records | The default SQLite adapter has no encryption at rest and cannot erase copies or filesystem artifacts; local admins can read or modify data | Host operator |
+| Malicious local administrator or compromised host | Fail-closed validation and transactional integrity reduce accidental misuse | An administrator can inspect plaintext, replace code, bypass APIs, tamper with files, or capture process memory | Host operator |
+| Supply-chain or contribution compromise | No runtime dependencies; pinned GitHub Actions; CI, CodeQL, dependency review; synthetic fixtures; provenance sign-off and security review | Build tooling and Actions still form a supply chain; maintainers can approve harmful changes or let pins age | Maintainers and contributors |
+
+This model does not claim protection for content after a host copies it outside
+the controlled database.

@@ -1,0 +1,40 @@
+name: Feature request
+description: Propose a focused improvement without sensitive data.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Never post tokens, credentials, prompts, conversations, databases,
+        logs, or other sensitive data. Security vulnerabilities must follow
+        SECURITY.md and must not be filed publicly.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the use case with synthetic examples only.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Explain the public contract and expected lifecycle behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: security
+    attributes:
+      label: Security boundary
+      description: State likely threats, controls, residual risks, and owners.
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Data safety
+      options:
+        - label: I used only synthetic data and included no sensitive material.
+          required: true

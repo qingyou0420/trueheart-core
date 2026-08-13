@@ -1,0 +1,55 @@
+name: Bug report
+description: Report a reproducible defect using synthetic data only.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Never post tokens, credentials, prompts, conversations, databases,
+        logs, or other sensitive data. Security vulnerabilities must follow
+        SECURITY.md and must not be filed publicly.
+  - type: input
+    id: version
+    attributes:
+      label: TrueHeart Core version
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Python and operating system
+      placeholder: Python 3.13 on Windows 11
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal synthetic reproduction
+      description: Replace every value and identifier with synthetic data.
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Data safety
+      options:
+        - label: I used only synthetic data and included no sensitive material.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

@@ -29,7 +29,6 @@ from .errors import (
     TrustEscalation,
     ValidationError,
 )
-from .ports import Repository
 from .service import TrueHeart
 from .sqlite import SQLiteRepository
 
@@ -50,7 +49,6 @@ __all__ = [
     "RawEventReceipt",
     "RecallItem",
     "RecallQuery",
-    "Repository",
     "RepositoryCorruption",
     "RetentionPolicy",
     "SQLiteRepository",
