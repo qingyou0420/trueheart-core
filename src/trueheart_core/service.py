@@ -7,14 +7,21 @@ from datetime import UTC, datetime
 from hashlib import sha256
 
 from .domain import (
+    AuditRecord,
+    EntityType,
+    GovernanceAction,
+    GovernanceCommand,
+    GovernanceResult,
     MemoryDraft,
     MemoryRecord,
     RawEventDraft,
     RawEventReceipt,
     RecallItem,
     RecallQuery,
+    Scope,
     _normalize_datetime,
 )
+from .errors import ValidationError
 from .ports import Repository, _dependency_fingerprint
 
 
@@ -70,3 +77,28 @@ class TrueHeart:
         items.sort(key=lambda item: item.memory.created_at, reverse=True)
         items.sort(key=lambda item: item.clarity, reverse=True)
         return tuple(items[: query.limit])
+
+    def expire_raw_content(self, *, as_of: datetime) -> int:
+        normalized_as_of = _normalize_datetime(as_of, "as_of")
+        return self._repository.expire_raw_content(as_of=normalized_as_of)
+
+    def govern(self, command: GovernanceCommand) -> GovernanceResult:
+        if not isinstance(command, GovernanceCommand):
+            raise ValidationError("command", "must be a GovernanceCommand")
+        if (
+            command.entity_type is EntityType.RAW_EVENT
+            and command.action is not GovernanceAction.DELETE
+        ):
+            raise ValidationError("action", "is not supported for raw events")
+        return self._repository.govern(command)
+
+    def audit(self, scope: Scope, *, limit: int = 100) -> tuple[AuditRecord, ...]:
+        if not isinstance(scope, Scope):
+            raise ValidationError("scope", "must be a Scope")
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 100
+        ):
+            raise ValidationError("limit", "must be from 1 through 100")
+        return self._repository.audit(scope, limit=limit)
