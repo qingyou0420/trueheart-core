@@ -7,18 +7,15 @@ change as the project matures.
 
 ## Report a vulnerability
 
-Use GitHub private vulnerability reporting for sensitive reports. This channel
-will be enabled before the repository is published; this local checkout does
-not claim that the channel is presently live.
+GitHub private vulnerability reporting is enabled for sensitive reports.
 
 Never post tokens, credentials, prompts, conversations, databases, logs, or
 other sensitive data in a public issue, discussion, pull request, or commit.
-When private reporting is available, provide the smallest synthetic reproducer
-that demonstrates impact, affected version, and relevant platform details.
+Provide the smallest synthetic reproducer that demonstrates impact, affected
+version, and relevant platform details.
 
-If private vulnerability reporting is not yet visible, do not disclose the
-details publicly. Wait until the private channel is enabled. No response or
-remediation SLA is promised.
+Do not disclose vulnerability details publicly. No response or remediation SLA
+is promised.
 
 ## Security boundary
 

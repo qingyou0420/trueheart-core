@@ -85,8 +85,9 @@ transaction. Forgetting a memory does not delete its source events.
 
 ## Installation
 
-PyPI installation will be available after release; this does not claim that the
-package is published yet:
+The source repository is public. Publishing the `v0.1.0` GitHub Release will
+run the package publication workflow. After successful package publication,
+install from PyPI with:
 
 ```console
 python -m pip install trueheart-core==0.1.0
@@ -153,7 +154,8 @@ report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
 ## Status
 
-Version 0.1.0 is prepared for initial public review; repository publication and
-package release are separate operations. Its API is intentionally small.
+Version 0.1.0 has a public source repository, but the package is not yet
+published to PyPI. Its API is intentionally small. Publishing the `v0.1.0`
+GitHub Release will run the package publication workflow.
 Semantic search, embeddings, model integration, service authentication,
 provider deletion, backup management, and encryption at rest are out of scope.

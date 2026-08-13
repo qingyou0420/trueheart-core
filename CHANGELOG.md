@@ -4,6 +4,11 @@ All notable changes to TrueHeart Core are documented here.
 
 ## [0.1.0] - 2026-08-13
 
+### Changed
+
+- Release documentation now reflects the public source repository, enabled
+  private vulnerability reporting, and conditional package publication.
+
 ### Added
 
 - Immutable domain contracts for exact scope, provenance, trust, retention,
