@@ -117,6 +117,24 @@ Set the project README to `README.md` with Markdown content type. Add exact proj
 
 Run the focused and full suites, Ruff, format, mypy, build, artifact verifier, clean-wheel install, `pip check`, the example, and public HTTP checks for all four URLs. Commit exactly `build: complete v0.1 package metadata`.
 
+### Task 2B: Make the packaged README durable
+
+**Files:**
+- Modify: `README.md`
+- Modify: `tests/test_release_artifacts.py`
+
+- [ ] **Step 1: Add failing packaged-README regressions**
+
+Require the wheel and sdist README payloads to contain no publication-state claim that becomes false after the immutable `0.1.0` upload. Require every non-anchor Markdown link in the packaged README to be an absolute HTTPS URL, with repository documentation links targeting the canonical public GitHub repository.
+
+- [ ] **Step 2: Observe RED, fix minimally, and observe GREEN**
+
+Replace the explicit “not yet published” status with release-state-neutral wording. Convert repository-relative example, architecture, security, contribution, and support links to canonical absolute GitHub URLs. Preserve the factual conditional installation wording.
+
+- [ ] **Step 3: Rebuild, verify, and commit**
+
+Run the focused and full suites, Ruff, format, mypy, build, artifact verifier, clean-wheel install, `pip check`, the exact example, link HTTP checks, and `git diff --check`. Commit exactly `docs: make the PyPI readme durable`.
+
 ### Task 3: Publish and verify v0.1.0
 
 **Files:**
