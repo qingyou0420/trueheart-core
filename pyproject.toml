@@ -1,16 +1,23 @@
 [build-system]
-requires = ["setuptools>=77"]
+requires = ["setuptools==84.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "trueheart-core"
 version = "0.1.0"
 description = "Governed long-term memory contracts for AI agents"
+readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "qingyou0420" }]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/qingyou0420/trueheart-core"
+Source = "https://github.com/qingyou0420/trueheart-core"
+Issues = "https://github.com/qingyou0420/trueheart-core/issues"
+Security = "https://github.com/qingyou0420/trueheart-core/security/policy"
 
 [project.optional-dependencies]
 dev = [

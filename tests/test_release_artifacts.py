@@ -23,6 +23,18 @@ EXPECTED_DEV_REQUIREMENTS = (
     'pytest<9,>=8; extra == "dev"',
     'ruff<1,>=0.11; extra == "dev"',
 )
+EXPECTED_PROJECT_URLS = (
+    "Homepage, https://github.com/qingyou0420/trueheart-core",
+    "Source, https://github.com/qingyou0420/trueheart-core",
+    "Issues, https://github.com/qingyou0420/trueheart-core/issues",
+    "Security, https://github.com/qingyou0420/trueheart-core/security/policy",
+)
+README_PAYLOAD = "# TrueHeart Core\n\nSynthetic release metadata fixture.\n"
+SDIST_PYPROJECT = b"""\
+[build-system]
+requires = ["setuptools==84.0.0"]
+build-backend = "setuptools.build_meta"
+"""
 
 
 def _metadata(
@@ -32,6 +44,9 @@ def _metadata(
     requires_python: str = ">=3.11",
     requires_dist: tuple[str, ...] = EXPECTED_DEV_REQUIREMENTS,
     provides_extra: tuple[str, ...] = ("dev",),
+    description_content_types: tuple[str, ...] = ("text/markdown",),
+    project_urls: tuple[str, ...] = EXPECTED_PROJECT_URLS,
+    payload: str = README_PAYLOAD,
     extra_headers: tuple[str, ...] = (),
     omit_fields: tuple[str, ...] = (),
 ) -> bytes:
@@ -44,10 +59,15 @@ def _metadata(
         lines.append(f"Requires-Python: {requires_python}")
     if license_expression is not None and "License-Expression" not in omit_fields:
         lines.append(f"License-Expression: {license_expression}")
+    lines.extend(
+        f"Description-Content-Type: {content_type}"
+        for content_type in description_content_types
+    )
+    lines.extend(f"Project-URL: {project_url}" for project_url in project_urls)
     lines.extend(f"Provides-Extra: {extra}" for extra in provides_extra)
     lines.extend(f"Requires-Dist: {requirement}" for requirement in requires_dist)
     lines.extend(extra_headers)
-    return ("\n".join(lines) + "\n\n").encode()
+    return ("\n".join(lines) + "\n\n" + payload).encode()
 
 
 def _record_hash(content: bytes) -> str:
@@ -108,13 +128,15 @@ def _write_sdist(
     path: Path,
     metadata: bytes,
     *,
+    pyproject: bytes | None = SDIST_PYPROJECT,
     extra_members: tuple[str, ...] = (),
     link_member: str | None = None,
 ) -> None:
     with tarfile.open(path, "w:gz") as archive:
         root = "trueheart_core-0.1.0"
         _add_tar_bytes(archive, f"{root}/PKG-INFO", metadata)
-        _add_tar_bytes(archive, f"{root}/pyproject.toml", b"[build-system]\n")
+        if pyproject is not None:
+            _add_tar_bytes(archive, f"{root}/pyproject.toml", pyproject)
         for member_name in extra_members:
             _add_tar_bytes(archive, member_name, b"unsafe\n")
         if link_member is not None:
@@ -132,12 +154,18 @@ def _create_artifacts(
     requires_python: str = ">=3.11",
     requires_dist: tuple[str, ...] = EXPECTED_DEV_REQUIREMENTS,
     provides_extra: tuple[str, ...] = ("dev",),
+    description_content_types: tuple[str, ...] = ("text/markdown",),
+    project_urls: tuple[str, ...] = EXPECTED_PROJECT_URLS,
+    payload: str = README_PAYLOAD,
     extra_headers: tuple[str, ...] = (),
     omit_fields: tuple[str, ...] = (),
     wheel_member: str | None = None,
     wheel_member_mode: int | None = None,
     sdist_members: tuple[str, ...] = (),
     sdist_link: str | None = None,
+    sdist_pyproject: bytes | None = SDIST_PYPROJECT,
+    wheel_metadata: bytes | None = None,
+    sdist_metadata: bytes | None = None,
     valid_record: bool = True,
 ) -> Path:
     dist = directory / "dist"
@@ -148,6 +176,9 @@ def _create_artifacts(
         requires_python=requires_python,
         requires_dist=requires_dist,
         provides_extra=provides_extra,
+        description_content_types=description_content_types,
+        project_urls=project_urls,
+        payload=payload,
         extra_headers=extra_headers,
         omit_fields=omit_fields,
     )
@@ -155,14 +186,15 @@ def _create_artifacts(
     sdist_name = SDIST_NAME.replace("0.1.0", version)
     _write_wheel(
         dist / wheel_name,
-        metadata,
+        metadata if wheel_metadata is None else wheel_metadata,
         valid_record=valid_record,
         extra_member=wheel_member,
         extra_member_mode=wheel_member_mode,
     )
     _write_sdist(
         dist / sdist_name,
-        metadata,
+        metadata if sdist_metadata is None else sdist_metadata,
+        pyproject=sdist_pyproject,
         extra_members=sdist_members,
         link_member=sdist_link,
     )
@@ -434,6 +466,122 @@ def test_verifier_rejects_the_wrong_python_requirement(tmp_path: Path) -> None:
     _assert_rejected(result, "Requires-Python must be >=3.11")
 
 
+@pytest.mark.parametrize(
+    ("content_types", "message"),
+    [
+        ((), "Description-Content-Type must appear exactly once"),
+        (
+            ("text/markdown", "text/markdown"),
+            "Description-Content-Type must appear exactly once",
+        ),
+        (("text/plain",), "Description-Content-Type must be text/markdown"),
+    ],
+)
+def test_verifier_rejects_missing_duplicate_or_non_markdown_content_type(
+    tmp_path: Path,
+    content_types: tuple[str, ...],
+    message: str,
+) -> None:
+    _create_artifacts(tmp_path, description_content_types=content_types)
+
+    result = _run_verifier(tmp_path)
+
+    _assert_rejected(result, message)
+
+
+@pytest.mark.parametrize("payload", ["", "   \n", "TrueHeart Core\n"])
+def test_verifier_rejects_a_missing_or_non_readme_long_description(
+    tmp_path: Path, payload: str
+) -> None:
+    _create_artifacts(tmp_path, payload=payload)
+
+    result = _run_verifier(tmp_path)
+
+    _assert_rejected(result, "long description must begin with # TrueHeart Core")
+
+
+@pytest.mark.parametrize(
+    "project_urls",
+    [
+        EXPECTED_PROJECT_URLS[:-1],
+        EXPECTED_PROJECT_URLS + (EXPECTED_PROJECT_URLS[0],),
+        EXPECTED_PROJECT_URLS
+        + ("Documentation, https://github.com/qingyou0420/trueheart-core/wiki",),
+    ],
+)
+def test_verifier_rejects_missing_duplicate_or_unknown_project_urls(
+    tmp_path: Path, project_urls: tuple[str, ...]
+) -> None:
+    _create_artifacts(tmp_path, project_urls=project_urls)
+
+    result = _run_verifier(tmp_path)
+
+    _assert_rejected(result, "Project-URL must match the exact public URL set")
+
+
+def test_verifier_rejects_invalid_public_metadata_in_the_sdist(
+    tmp_path: Path,
+) -> None:
+    invalid_sdist_metadata = _metadata(project_urls=EXPECTED_PROJECT_URLS[:-1])
+    _create_artifacts(tmp_path, sdist_metadata=invalid_sdist_metadata)
+
+    result = _run_verifier(tmp_path)
+
+    _assert_rejected(result, "sdist PKG-INFO: Project-URL")
+
+
+def test_verifier_rejects_an_sdist_without_a_pyproject(tmp_path: Path) -> None:
+    _create_artifacts(tmp_path, sdist_pyproject=None)
+
+    result = _run_verifier(tmp_path)
+
+    _assert_rejected(result, "sdist is missing trueheart_core-0.1.0/pyproject.toml")
+
+
+def test_verifier_rejects_malformed_sdist_pyproject_toml(tmp_path: Path) -> None:
+    _create_artifacts(tmp_path, sdist_pyproject=b"[build-system\n")
+
+    result = _run_verifier(tmp_path)
+
+    _assert_rejected(result, "sdist pyproject.toml is not valid TOML")
+
+
+@pytest.mark.parametrize(
+    "pyproject",
+    [
+        b"""\
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+""",
+        b"""\
+[build-system]
+requires = ["setuptools==84.0.0", "wheel==0.46.3"]
+build-backend = "setuptools.build_meta"
+""",
+        b"""\
+[build-system]
+requires = ["setuptools==84.0.0"]
+build-backend = "setuptools.build_meta:__legacy__"
+""",
+        b"""\
+[build-system]
+requires = ["setuptools==84.0.0"]
+build-backend = "setuptools.build_meta"
+backend-path = ["backend"]
+""",
+    ],
+)
+def test_verifier_rejects_a_non_exact_sdist_build_system(
+    tmp_path: Path, pyproject: bytes
+) -> None:
+    _create_artifacts(tmp_path, sdist_pyproject=pyproject)
+
+    result = _run_verifier(tmp_path)
+
+    _assert_rejected(result, "sdist build-system must match the exact backend pin")
+
+
 def test_verifier_rejects_a_wheel_with_a_tampered_record_hash(tmp_path: Path) -> None:
     _create_artifacts(tmp_path, valid_record=False)
 
@@ -455,6 +603,7 @@ def test_verifier_accepts_safe_artifacts_and_writes_deterministic_checksums(
         for path in sorted(dist.iterdir(), key=lambda item: item.name)
     )
     assert (tmp_path / "SHA256SUMS").read_text(encoding="ascii") == expected
+    assert not (tmp_path / "trueheart_core-0.1.0").exists()
 
 
 def test_release_workflow_binds_the_tag_to_the_release_event_commit() -> None:

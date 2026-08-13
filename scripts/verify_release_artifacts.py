@@ -8,6 +8,7 @@ import hashlib
 import stat
 import sys
 import tarfile
+import tomllib
 import zipfile
 from collections import Counter
 from email.message import Message
@@ -25,6 +26,16 @@ ALLOWED_REQUIRES_DIST = (
     'pytest<9,>=8; extra == "dev"',
     'ruff<1,>=0.11; extra == "dev"',
 )
+EXPECTED_PROJECT_URLS = (
+    "Homepage, https://github.com/qingyou0420/trueheart-core",
+    "Source, https://github.com/qingyou0420/trueheart-core",
+    "Issues, https://github.com/qingyou0420/trueheart-core/issues",
+    "Security, https://github.com/qingyou0420/trueheart-core/security/policy",
+)
+EXPECTED_BUILD_SYSTEM = {
+    "requires": ["setuptools==84.0.0"],
+    "build-backend": "setuptools.build_meta",
+}
 
 
 class VerificationError(Exception):
@@ -77,6 +88,28 @@ def _verify_metadata(metadata_bytes: bytes, source: str) -> None:
     if Counter(requirements) != Counter(ALLOWED_REQUIRES_DIST):
         raise VerificationError(
             f"{source}: Requires-Dist must match the exact dev dependency set"
+        )
+
+    content_types = metadata.get_all("Description-Content-Type", [])
+    if len(content_types) != 1:
+        raise VerificationError(
+            f"{source}: Description-Content-Type must appear exactly once"
+        )
+    if content_types[0] != "text/markdown":
+        raise VerificationError(
+            f"{source}: Description-Content-Type must be text/markdown"
+        )
+
+    payload = metadata.get_payload()
+    if not isinstance(payload, str) or not payload.startswith("# TrueHeart Core"):
+        raise VerificationError(
+            f"{source}: long description must begin with # TrueHeart Core"
+        )
+
+    project_urls = metadata.get_all("Project-URL", [])
+    if Counter(project_urls) != Counter(EXPECTED_PROJECT_URLS):
+        raise VerificationError(
+            f"{source}: Project-URL must match the exact public URL set"
         )
 
 
@@ -152,10 +185,12 @@ def _verify_wheel(wheel_path: Path) -> None:
 
 def _verify_sdist(sdist_path: Path) -> None:
     metadata_name = f"{SDIST_ROOT}/PKG-INFO"
+    pyproject_name = f"{SDIST_ROOT}/pyproject.toml"
     with tarfile.open(sdist_path, mode="r:gz") as sdist:
         members = sdist.getmembers()
         names: set[str] = set()
         metadata_member: tarfile.TarInfo | None = None
+        pyproject_member: tarfile.TarInfo | None = None
         for member in members:
             _verify_member_name(member.name, "sdist", expected_root=SDIST_ROOT)
             if not (member.isfile() or member.isdir()):
@@ -165,6 +200,8 @@ def _verify_sdist(sdist_path: Path) -> None:
             names.add(member.name)
             if member.name == metadata_name:
                 metadata_member = member
+            elif member.name == pyproject_name:
+                pyproject_member = member
 
         if metadata_member is None:
             raise VerificationError(f"sdist is missing {metadata_name}")
@@ -172,6 +209,20 @@ def _verify_sdist(sdist_path: Path) -> None:
         if metadata_file is None:
             raise VerificationError(f"sdist cannot read {metadata_name}")
         _verify_metadata(metadata_file.read(), "sdist PKG-INFO")
+
+        if pyproject_member is None:
+            raise VerificationError(f"sdist is missing {pyproject_name}")
+        pyproject_file = sdist.extractfile(pyproject_member)
+        if pyproject_file is None:
+            raise VerificationError(f"sdist cannot read {pyproject_name}")
+        try:
+            pyproject = tomllib.load(pyproject_file)
+        except tomllib.TOMLDecodeError as error:
+            raise VerificationError("sdist pyproject.toml is not valid TOML") from error
+        if pyproject.get("build-system") != EXPECTED_BUILD_SYSTEM:
+            raise VerificationError(
+                "sdist build-system must match the exact backend pin"
+            )
 
 
 def _write_checksums(paths: tuple[Path, Path], destination: Path) -> None:
