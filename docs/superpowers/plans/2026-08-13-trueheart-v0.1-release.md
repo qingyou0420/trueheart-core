@@ -72,7 +72,7 @@ Run `python -m pytest tests/test_release_artifacts.py -q`; expected failure is t
 
 - [ ] **Step 3: Implement the verifier**
 
-Use only the standard library. Parse wheel `METADATA`, inspect wheel `RECORD` hashes, inspect tar members without extraction, require `Name: trueheart-core`, `Version: 0.1.0`, `Requires-Python: >=3.11`, `License-Expression: MIT`, no `Requires-Dist`, exactly one `trueheart_core-0.1.0-py3-none-any.whl`, and exactly one `trueheart_core-0.1.0.tar.gz`. Generate deterministic lowercase SHA-256 lines in `SHA256SUMS` for both artifacts.
+Use only the standard library. Parse wheel `METADATA`, inspect wheel `RECORD` hashes, inspect tar members without extraction, require `Name: trueheart-core`, `Version: 0.1.0`, `Requires-Python: >=3.11`, and `License-Expression: MIT`. Reject every unguarded runtime dependency and every unknown optional dependency; permit only the four exact existing `dev` extra requirements for build, mypy, pytest, and Ruff. Require exactly one `trueheart_core-0.1.0-py3-none-any.whl` and exactly one `trueheart_core-0.1.0.tar.gz`. Generate deterministic lowercase SHA-256 lines in `SHA256SUMS` for both artifacts.
 
 - [ ] **Step 4: Run tests and observe GREEN**
 
