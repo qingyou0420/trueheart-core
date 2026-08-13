@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from threading import Lock
 from typing import cast
 from uuid import uuid4
 
@@ -133,7 +133,9 @@ CREATE INDEX IF NOT EXISTS idx_memory_sources_event
 _SCHEMA_STATEMENTS = tuple(
     statement.strip() for statement in _SCHEMA.split(";") if statement.strip()
 )
-_SCHEMA_INITIALIZATION_LOCK = Lock()
+_WAL_RETRY_ATTEMPTS = 30
+_WAL_RETRY_INITIAL_SECONDS = 0.002
+_WAL_RETRY_MAX_SECONDS = 0.05
 
 
 def _datetime_text(value: datetime) -> str:
@@ -160,18 +162,41 @@ class SQLiteRepository:
         connection = sqlite3.connect(self._path, isolation_level=None)
         try:
             connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA busy_timeout = 25")
             connection.execute("PRAGMA foreign_keys = ON")
-            connection.execute("PRAGMA journal_mode = WAL")
+            self._enable_wal(connection)
+            connection.execute("PRAGMA busy_timeout = 5000")
             return connection
-        except sqlite3.Error:
+        except (RepositoryCorruption, sqlite3.Error):
             connection.close()
             raise
 
-    def _initialize_schema(self) -> None:
-        with _SCHEMA_INITIALIZATION_LOCK:
-            self._initialize_schema_locked()
+    @staticmethod
+    def _enable_wal(connection: sqlite3.Connection) -> None:
+        delay = _WAL_RETRY_INITIAL_SECONDS
+        for attempt in range(_WAL_RETRY_ATTEMPTS):
+            try:
+                row = connection.execute("PRAGMA journal_mode = WAL").fetchone()
+            except sqlite3.OperationalError as error:
+                error_code = getattr(error, "sqlite_errorcode", None)
+                base_error_code = (
+                    error_code & 0xFF if isinstance(error_code, int) else None
+                )
+                retryable = base_error_code in (
+                    sqlite3.SQLITE_BUSY,
+                    sqlite3.SQLITE_LOCKED,
+                )
+                if not retryable or attempt + 1 == _WAL_RETRY_ATTEMPTS:
+                    raise
+                time.sleep(delay)
+                delay = min(delay * 2, _WAL_RETRY_MAX_SECONDS)
+                continue
+            if row is None or row[0] != "wal":
+                raise RepositoryCorruption("WAL mode unavailable")
+            return
+        raise RepositoryCorruption("WAL mode unavailable")
 
-    def _initialize_schema_locked(self) -> None:
+    def _initialize_schema(self) -> None:
         connection: sqlite3.Connection | None = None
         try:
             connection = self._connect()

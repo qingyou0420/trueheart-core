@@ -1,8 +1,11 @@
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from multiprocessing import get_context
 from pathlib import Path
+from queue import Empty
 from threading import Barrier
+from typing import Protocol
 
 import pytest
 
@@ -19,6 +22,31 @@ from trueheart_core import (
     TrustLevel,
     ValidationError,
 )
+
+
+class _ProcessStartEvent(Protocol):
+    def wait(self, timeout: float | None = None) -> bool: ...
+
+
+class _ProcessResultQueue(Protocol):
+    def put(self, item: tuple[str, str]) -> None: ...
+
+
+def _initialize_repository_process(
+    path: str,
+    start_event: _ProcessStartEvent,
+    results: _ProcessResultQueue,
+) -> None:
+    results.put(("ready", ""))
+    if not start_event.wait(timeout=10.0):
+        results.put(("error", "start timeout"))
+        return
+    try:
+        SQLiteRepository(path)
+    except Exception as error:  # noqa: BLE001 - child reports failures to parent
+        results.put(("error", type(error).__name__))
+    else:
+        results.put(("ok", ""))
 
 
 def _draft(
@@ -238,6 +266,50 @@ def test_concurrent_repository_initializers_are_consistent(tmp_path: Path) -> No
         "schema_migrations",
         "tombstones",
     }
+
+
+def test_concurrent_process_repository_initializers_are_consistent(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "concurrent-process-init.db"
+    context = get_context("spawn")
+    start_event = context.Event()
+    results = context.Queue()
+    processes = [
+        context.Process(
+            target=_initialize_repository_process,
+            args=(str(path), start_event, results),
+        )
+        for _ in range(24)
+    ]
+    try:
+        for process in processes:
+            process.start()
+        ready = [results.get(timeout=20.0) for _ in processes]
+        assert ready == [("ready", "")] * len(processes)
+
+        start_event.set()
+        outcomes = [results.get(timeout=30.0) for _ in processes]
+        for process in processes:
+            process.join(timeout=10.0)
+        assert all(not process.is_alive() for process in processes)
+        assert all(process.exitcode == 0 for process in processes)
+        assert outcomes == [("ok", "")] * len(processes)
+    except Empty:
+        pytest.fail("constructor process did not report within the bounded timeout")
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+            process.join(timeout=5.0)
+        results.close()
+        results.join_thread()
+
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+        assert connection.execute(
+            "SELECT version FROM schema_migrations"
+        ).fetchall() == [(1,)]
 
 
 def test_ingest_rechecks_schema_version_inside_write_transaction(
