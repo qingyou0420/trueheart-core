@@ -14,7 +14,8 @@ runtime dependencies or long-lived publishing credentials.
   `SHA256SUMS` file.
 - PyPI publication uses Trusted Publishing from `.github/workflows/release.yml`
   and the protected GitHub environment `pypi`; no PyPI token is stored.
-- The release workflow starts only when a GitHub Release is published.
+- Manual dispatch runs only a permissionless registration preflight. Build and
+  publication jobs run only when a GitHub Release is published.
 
 ## Workflow
 
@@ -23,6 +24,8 @@ archive contents, installs the wheel into a clean virtual environment, and
 runs `examples/basic_memory.py`. It then uploads the exact verified artifacts.
 Separate jobs download that artifact: one uploads assets to the existing
 GitHub Release, and one publishes the distributions to PyPI with OIDC.
+The manual registration preflight does not check out code, build artifacts,
+request an environment, or receive repository or OIDC permissions.
 
 The expected example output is exactly:
 

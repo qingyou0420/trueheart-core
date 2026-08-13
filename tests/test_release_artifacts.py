@@ -50,6 +50,19 @@ EXPECTED_PACKAGED_README_LINKS = {
 MARKDOWN_LINK_TARGET = re.compile(r"(?<!!)\[[^]]+\]\(([^)]+)\)")
 
 
+def _workflow_job_blocks(workflow: str) -> dict[str, str]:
+    jobs = workflow.split("\njobs:\n", maxsplit=1)[1]
+    headers = list(re.finditer(r"(?m)^  ([a-z0-9-]+):\n", jobs))
+    return {
+        match.group(1): jobs[match.start() : next_start]
+        for match, next_start in zip(
+            headers,
+            [other.start() for other in headers[1:]] + [len(jobs)],
+            strict=True,
+        )
+    }
+
+
 def _metadata(
     *,
     version: str = "0.1.0",
@@ -677,6 +690,64 @@ def test_release_workflow_binds_the_tag_to_the_release_event_commit() -> None:
         "Verify release tag points to event commit"
     )
     assert "ref: ${{ github.event.release.tag_name }}" not in workflow
+
+
+def test_manual_release_preflight_cannot_enter_a_publication_job() -> None:
+    workflow_path = ROOT / ".github" / "workflows" / "release.yml"
+    workflow = workflow_path.read_text(encoding="utf-8")
+    trigger_block = workflow.split("\npermissions:", maxsplit=1)[0].split(
+        "\non:\n", maxsplit=1
+    )[1]
+
+    assert trigger_block == (
+        "  workflow_dispatch:\n  release:\n    types: [published]\n"
+    )
+
+    jobs = _workflow_job_blocks(workflow)
+    assert set(jobs) == {"preflight", "build", "github-release", "pypi"}
+
+    preflight = jobs["preflight"]
+    assert "if: ${{ github.event_name == 'workflow_dispatch' }}" in preflight
+    assert "permissions: {}" in preflight
+    assert 'test "$GITHUB_EVENT_NAME" = "workflow_dispatch"' in preflight
+    assert 'test "$GITHUB_REF" = "refs/heads/main"' in preflight
+    for forbidden in (
+        "uses:",
+        "needs:",
+        "environment:",
+        "id-token:",
+        "contents: write",
+        "github.token",
+        "secrets.",
+        "upload-artifact",
+        "download-artifact",
+        "gh release",
+        "gh-action-pypi-publish",
+        "python -m build",
+        "pip ",
+        "curl ",
+        "wget ",
+    ):
+        assert forbidden not in preflight
+
+    release_only = (
+        "${{ github.event_name == 'release' && github.event.action == 'published' }}"
+    )
+    for job_name in ("build", "github-release", "pypi"):
+        assert jobs[job_name].count(f"    if: {release_only}\n") == 1
+        assert "workflow_dispatch" not in jobs[job_name]
+
+    assert "    needs:" not in jobs["preflight"]
+    assert "    needs:" not in jobs["build"]
+    assert jobs["github-release"].count("    needs: build\n") == 1
+    assert jobs["pypi"].count("    needs: build\n") == 1
+    assert jobs["github-release"].count("      contents: write\n") == 1
+    assert jobs["pypi"].count("      id-token: write\n") == 1
+    assert jobs["pypi"].count("    environment: pypi\n") == 1
+    assert workflow.count("      contents: write\n") == 1
+    assert workflow.count("      id-token: write\n") == 1
+    assert "always()" not in workflow
+    assert "continue-on-error" not in workflow
 
 
 def test_release_workflow_keeps_partial_publication_recovery_fail_loud() -> None:
