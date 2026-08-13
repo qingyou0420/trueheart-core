@@ -251,6 +251,41 @@ def test_identical_materialization_preserves_sealed_lifecycle_state(
         ).fetchone() == (1,)
 
 
+def test_identical_materialization_uses_creation_snapshots_not_current_sources(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "source-snapshot-replay.db"
+    service = _service(path)
+    _ingest_sources(service)
+    original = service.materialize_once(_memory())
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA ignore_check_constraints = ON")
+        connection.execute(
+            "UPDATE raw_events SET source_trust = ?, clear_for_microseconds = ?, "
+            "recall_for_microseconds = ?, source_metadata_json = ? "
+            "WHERE tenant_id = ? AND owner_id = ? AND subject_id = ? "
+            "AND event_id = ?",
+            (
+                int(TrustLevel.UNTRUSTED),
+                1,
+                2,
+                '{"changed":true}',
+                "tenant",
+                "owner",
+                "subject",
+                "evt-2",
+            ),
+        )
+
+    repeated = service.materialize_once(_memory())
+
+    assert repeated == original
+    with sqlite3.connect(path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE action = ?", ("materialize",)
+        ).fetchone() == (1,)
+
+
 def test_changed_memory_with_same_id_conflicts(tmp_path: Path) -> None:
     path = tmp_path / "conflict.db"
     service = _service(path)

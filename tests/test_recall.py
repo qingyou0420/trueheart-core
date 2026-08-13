@@ -21,6 +21,18 @@ from trueheart_core import (
 SCOPE = Scope("tenant", "owner", "subject")
 
 
+class _TracingSQLiteRepository(SQLiteRepository):
+    def __init__(self, path: Path) -> None:
+        self.statements: list[str] = []
+        super().__init__(path)
+        self.statements.clear()
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = super()._connect()
+        connection.set_trace_callback(self.statements.append)
+        return connection
+
+
 def _service(path: Path) -> TrueHeart:
     return TrueHeart(
         SQLiteRepository(path),
@@ -382,4 +394,107 @@ def test_recall_rejects_persisted_deadlines_not_derived_from_sources(
     with pytest.raises(RepositoryCorruption) as error:
         service.recall(RecallQuery(scope=SCOPE, as_of=created))
 
+    assert error.value.__cause__ is None
+
+
+def test_recall_uses_one_read_snapshot_and_batch_loads_lineage(
+    tmp_path: Path,
+) -> None:
+    repository = _TracingSQLiteRepository(tmp_path / "batched-recall.db")
+    service = TrueHeart(
+        repository,
+        clock=lambda: datetime(2026, 8, 13, 8, tzinfo=UTC),
+    )
+    created = datetime(2026, 8, 13, 9, tzinfo=UTC)
+    for suffix in ("a", "b", "c"):
+        _add_memory(
+            service,
+            memory_id=f"mem-{suffix}",
+            event_id=f"evt-{suffix}",
+            created_at=created,
+        )
+    repository.statements.clear()
+
+    items = service.recall(RecallQuery(scope=SCOPE, as_of=created))
+
+    assert len(items) == 3
+    statements = [statement.upper() for statement in repository.statements]
+    assert sum(statement.startswith("BEGIN") for statement in statements) == 1
+    assert sum(statement.startswith("COMMIT") for statement in statements) == 1
+    selects = [statement for statement in statements if statement.startswith("SELECT")]
+    assert len(selects) == 2
+    assert sum("FROM MEMORIES" in statement for statement in selects) == 1
+    assert sum("FROM MEMORY_SOURCES" in statement for statement in selects) == 1
+
+
+@pytest.mark.parametrize(
+    ("column", "stored_value"),
+    [
+        ("status", "private-status-sentinel"),
+        ("clear_until", "private-time-sentinel"),
+        ("recall_until", "private-time-sentinel"),
+        ("clear_until", "2026-08-15T17:00:00.000000+08:00"),
+        ("recall_until", "2026-08-14T09:00:00.000000+00:00"),
+    ],
+    ids=[
+        "status",
+        "malformed-clear-until",
+        "malformed-recall-until",
+        "noncanonical-offset",
+        "invalid-order",
+    ],
+)
+def test_recall_rejects_corrupt_status_or_deadline_before_eligibility_filtering(
+    tmp_path: Path,
+    column: str,
+    stored_value: str,
+) -> None:
+    path = tmp_path / f"corrupt-filtered-{column}.db"
+    service = _service(path)
+    created = datetime(2026, 8, 13, 9, tzinfo=UTC)
+    _add_memory(
+        service,
+        memory_id="mem-corrupt-filter",
+        event_id="evt-corrupt-filter",
+        created_at=created,
+    )
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA ignore_check_constraints = ON")
+        connection.execute(
+            f"UPDATE memories SET {column} = ? WHERE memory_id = ?",
+            (stored_value, "mem-corrupt-filter"),
+        )
+
+    with pytest.raises(RepositoryCorruption) as error:
+        service.recall(RecallQuery(scope=SCOPE, as_of=created + timedelta(days=100)))
+
+    assert stored_value not in str(error.value)
+    assert "raw private synthetic body" not in str(error.value)
+    assert error.value.__cause__ is None
+
+
+def test_recall_validates_corrupt_kind_before_optional_kind_filter(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "corrupt-filtered-kind.db"
+    service = _service(path)
+    created = datetime(2026, 8, 13, 9, tzinfo=UTC)
+    _add_memory(
+        service,
+        memory_id="mem-corrupt-kind",
+        event_id="evt-corrupt-kind",
+        created_at=created,
+        kind="plan",
+    )
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE memories SET kind = ? WHERE memory_id = ?",
+            (sqlite3.Binary(b"private-kind-sentinel"), "mem-corrupt-kind"),
+        )
+
+    query = RecallQuery(scope=SCOPE, as_of=created, kinds=("fact",))
+    with pytest.raises(RepositoryCorruption) as error:
+        service.recall(query)
+
+    assert "private-kind-sentinel" not in str(error.value)
     assert error.value.__cause__ is None

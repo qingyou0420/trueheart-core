@@ -97,6 +97,12 @@ CREATE TABLE IF NOT EXISTS memory_sources (
     subject_id TEXT NOT NULL,
     memory_id TEXT NOT NULL,
     event_id TEXT NOT NULL,
+    source_trust_snapshot INTEGER NOT NULL
+        CHECK (source_trust_snapshot BETWEEN 0 AND 2),
+    clear_for_microseconds_snapshot INTEGER NOT NULL
+        CHECK (clear_for_microseconds_snapshot > 0),
+    recall_for_microseconds_snapshot INTEGER NOT NULL
+        CHECK (recall_for_microseconds_snapshot >= clear_for_microseconds_snapshot),
     PRIMARY KEY (tenant_id, owner_id, subject_id, memory_id, event_id),
     FOREIGN KEY (tenant_id, owner_id, subject_id, memory_id)
         REFERENCES memories (tenant_id, owner_id, subject_id, memory_id)
@@ -408,6 +414,30 @@ class SQLiteRepository:
             if fingerprint_tombstone is not None:
                 raise EntityDeleted(draft.memory_id)
 
+            existing = connection.execute(
+                "SELECT * FROM memories WHERE tenant_id = ? AND owner_id = ? "
+                "AND subject_id = ? AND memory_id = ?",
+                (*scope, draft.memory_id),
+            ).fetchone()
+            if existing is not None:
+                source_rows = connection.execute(
+                    "SELECT event_id, event_id AS receipt_event_id, "
+                    "source_trust_snapshot, clear_for_microseconds_snapshot, "
+                    "recall_for_microseconds_snapshot FROM memory_sources "
+                    "WHERE tenant_id = ? AND owner_id = ? AND subject_id = ? "
+                    "AND memory_id = ? ORDER BY event_id",
+                    (*scope, draft.memory_id),
+                ).fetchall()
+                record = self._memory_record(existing, source_rows)
+                if not self._is_identical_memory(
+                    record,
+                    draft,
+                    dependency_fingerprint=dependency_fingerprint,
+                ):
+                    raise IdempotencyConflict(draft.memory_id)
+                connection.commit()
+                return record
+
             source_receipts: list[RawEventReceipt] = []
             for event_id in draft.source_event_ids:
                 row = connection.execute(
@@ -447,24 +477,6 @@ class SQLiteRepository:
             clear_until = draft.created_at + shortest_clear_for
             recall_until = draft.created_at + shortest_recall_for
 
-            existing = connection.execute(
-                "SELECT * FROM memories WHERE tenant_id = ? AND owner_id = ? "
-                "AND subject_id = ? AND memory_id = ?",
-                (*scope, draft.memory_id),
-            ).fetchone()
-            if existing is not None:
-                record = self._memory_record(connection, existing)
-                if not self._is_identical_memory(
-                    record,
-                    draft,
-                    dependency_fingerprint=dependency_fingerprint,
-                    clear_until=clear_until,
-                    recall_until=recall_until,
-                ):
-                    raise IdempotencyConflict(draft.memory_id)
-                connection.commit()
-                return record
-
             connection.execute(
                 "INSERT INTO memories (tenant_id, owner_id, subject_id, memory_id, "
                 "content, dependency_fingerprint, kind, trust, created_at, "
@@ -484,11 +496,23 @@ class SQLiteRepository:
                     _canonical_json(draft.metadata),
                 ),
             )
+            receipts_by_id = {receipt.event_id: receipt for receipt in source_receipts}
             for event_id in sorted(draft.source_event_ids):
+                receipt = receipts_by_id[event_id]
                 connection.execute(
                     "INSERT INTO memory_sources (tenant_id, owner_id, subject_id, "
-                    "memory_id, event_id) VALUES (?, ?, ?, ?, ?)",
-                    (*scope, draft.memory_id, event_id),
+                    "memory_id, event_id, source_trust_snapshot, "
+                    "clear_for_microseconds_snapshot, "
+                    "recall_for_microseconds_snapshot) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        *scope,
+                        draft.memory_id,
+                        event_id,
+                        int(receipt.source.trust),
+                        _timedelta_microseconds(receipt.clear_for),
+                        _timedelta_microseconds(receipt.recall_for),
+                    ),
                 )
             self._insert_materialize_audit(connection, draft)
             inserted = connection.execute(
@@ -498,7 +522,15 @@ class SQLiteRepository:
             ).fetchone()
             if inserted is None:
                 raise RepositoryCorruption("inserted memory missing")
-            record = self._memory_record(connection, inserted)
+            inserted_sources = connection.execute(
+                "SELECT event_id, event_id AS receipt_event_id, "
+                "source_trust_snapshot, clear_for_microseconds_snapshot, "
+                "recall_for_microseconds_snapshot FROM memory_sources "
+                "WHERE tenant_id = ? AND owner_id = ? AND subject_id = ? "
+                "AND memory_id = ? ORDER BY event_id",
+                (*scope, draft.memory_id),
+            ).fetchall()
+            record = self._memory_record(inserted, inserted_sources)
             connection.commit()
             return record
         except (
@@ -530,19 +562,16 @@ class SQLiteRepository:
         draft: MemoryDraft,
         *,
         dependency_fingerprint: str,
-        clear_until: datetime,
-        recall_until: datetime,
     ) -> bool:
         return (
-            record.scope == draft.scope
+            record.memory_id == draft.memory_id
+            and record.scope == draft.scope
             and record.content == draft.content
             and record.source_event_ids == tuple(sorted(draft.source_event_ids))
             and record.dependency_fingerprint == dependency_fingerprint
             and record.kind == draft.kind
             and record.trust == draft.trust
             and record.created_at == draft.created_at
-            and record.clear_until == clear_until
-            and record.recall_until == recall_until
             and record.metadata == draft.metadata
         )
 
@@ -568,7 +597,7 @@ class SQLiteRepository:
 
     @staticmethod
     def _memory_record(
-        connection: sqlite3.Connection, row: sqlite3.Row
+        row: sqlite3.Row, source_rows: list[sqlite3.Row]
     ) -> MemoryRecord:
         try:
             scope = Scope(
@@ -577,21 +606,6 @@ class SQLiteRepository:
                 SQLiteRepository._stored_text(row, "subject_id"),
             )
             memory_id = SQLiteRepository._stored_text(row, "memory_id")
-            source_rows = connection.execute(
-                "SELECT edges.event_id, receipts.event_id AS receipt_event_id, "
-                "receipts.source_trust AS receipt_trust, "
-                "receipts.clear_for_microseconds AS receipt_clear_for_microseconds, "
-                "receipts.recall_for_microseconds AS receipt_recall_for_microseconds "
-                "FROM memory_sources AS edges LEFT JOIN raw_events AS receipts "
-                "ON receipts.tenant_id = edges.tenant_id "
-                "AND receipts.owner_id = edges.owner_id "
-                "AND receipts.subject_id = edges.subject_id "
-                "AND receipts.event_id = edges.event_id "
-                "WHERE edges.tenant_id = ? AND edges.owner_id = ? "
-                "AND edges.subject_id = ? AND edges.memory_id = ? "
-                "ORDER BY edges.event_id",
-                (*_scope_values(scope), memory_id),
-            ).fetchall()
             source_event_ids_list: list[str] = []
             source_trusts: list[TrustLevel] = []
             source_clear_periods: list[timedelta] = []
@@ -606,17 +620,19 @@ class SQLiteRepository:
                 source_event_ids_list.append(event_id)
                 source_trusts.append(
                     TrustLevel(
-                        SQLiteRepository._stored_integer(source_row, "receipt_trust")
+                        SQLiteRepository._stored_integer(
+                            source_row, "source_trust_snapshot"
+                        )
                     )
                 )
                 clear_period = timedelta(
                     microseconds=SQLiteRepository._stored_integer(
-                        source_row, "receipt_clear_for_microseconds"
+                        source_row, "clear_for_microseconds_snapshot"
                     )
                 )
                 recall_period = timedelta(
                     microseconds=SQLiteRepository._stored_integer(
-                        source_row, "receipt_recall_for_microseconds"
+                        source_row, "recall_for_microseconds_snapshot"
                     )
                 )
                 if clear_period <= timedelta(0) or recall_period < clear_period:
@@ -676,25 +692,63 @@ class SQLiteRepository:
         connection: sqlite3.Connection | None = None
         try:
             connection = self._connect()
-            statement = (
+            connection.execute("BEGIN")
+            scope_values = _scope_values(scope)
+            rows = connection.execute(
                 "SELECT * FROM memories WHERE tenant_id = ? AND owner_id = ? "
-                "AND subject_id = ? AND status = ? AND recall_until > ?"
+                "AND subject_id = ?",
+                scope_values,
+            ).fetchall()
+            source_rows = connection.execute(
+                "SELECT edges.memory_id, edges.event_id, "
+                "receipts.event_id AS receipt_event_id, "
+                "edges.source_trust_snapshot, "
+                "edges.clear_for_microseconds_snapshot, "
+                "edges.recall_for_microseconds_snapshot "
+                "FROM memory_sources AS edges LEFT JOIN raw_events AS receipts "
+                "ON receipts.tenant_id = edges.tenant_id "
+                "AND receipts.owner_id = edges.owner_id "
+                "AND receipts.subject_id = edges.subject_id "
+                "AND receipts.event_id = edges.event_id "
+                "WHERE edges.tenant_id = ? AND edges.owner_id = ? "
+                "AND edges.subject_id = ? ORDER BY edges.memory_id, edges.event_id",
+                scope_values,
+            ).fetchall()
+            sources_by_memory: dict[str, list[sqlite3.Row]] = {}
+            for source_row in source_rows:
+                memory_id = self._stored_text(source_row, "memory_id")
+                sources_by_memory.setdefault(memory_id, []).append(source_row)
+            records: list[MemoryRecord] = []
+            memory_ids: set[str] = set()
+            for row in rows:
+                memory_id = self._stored_text(row, "memory_id")
+                memory_ids.add(memory_id)
+                records.append(
+                    self._memory_record(row, sources_by_memory.get(memory_id, []))
+                )
+            if set(sources_by_memory) != memory_ids:
+                raise RepositoryCorruption("invalid memory record")
+            eligible = tuple(
+                record
+                for record in records
+                if record.status is MemoryStatus.ACTIVE
+                and record.recall_until > as_of
+                and (not kinds or record.kind in kinds)
             )
-            values: list[object] = [
-                *_scope_values(scope),
-                MemoryStatus.ACTIVE.value,
-                _datetime_text(as_of),
-            ]
-            if kinds:
-                placeholders = ", ".join("?" for _ in kinds)
-                statement += f" AND kind IN ({placeholders})"
-                values.extend(kinds)
-            rows = connection.execute(statement, values).fetchall()
-            return tuple(self._memory_record(connection, row) for row in rows)
+            connection.commit()
+            return eligible
         except RepositoryCorruption:
+            if connection is not None:
+                self._rollback_quietly(connection)
             raise
         except sqlite3.Error:
+            if connection is not None:
+                self._rollback_quietly(connection)
             raise RepositoryCorruption("memory recall failed") from None
+        except BaseException:
+            if connection is not None:
+                self._rollback_quietly(connection)
+            raise
         finally:
             if connection is not None:
                 connection.close()
