@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Lock
+from typing import cast
 from uuid import uuid4
 
 from .domain import (
     EntityType,
+    JsonValue,
     RawEventDraft,
     RawEventReceipt,
     Scope,
@@ -127,6 +130,11 @@ CREATE INDEX IF NOT EXISTS idx_memory_sources_event
     ON memory_sources (tenant_id, owner_id, subject_id, event_id);
 """
 
+_SCHEMA_STATEMENTS = tuple(
+    statement.strip() for statement in _SCHEMA.split(";") if statement.strip()
+)
+_SCHEMA_INITIALIZATION_LOCK = Lock()
+
 
 def _datetime_text(value: datetime) -> str:
     return value.isoformat(timespec="microseconds")
@@ -150,31 +158,71 @@ class SQLiteRepository:
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._path, isolation_level=None)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA journal_mode = WAL")
-        return connection
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA journal_mode = WAL")
+            return connection
+        except sqlite3.Error:
+            connection.close()
+            raise
 
     def _initialize_schema(self) -> None:
-        with self._connect() as connection:
-            migration_table = connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?",
-                ("table", "schema_migrations"),
-            ).fetchone()
-            if migration_table is not None:
-                row = connection.execute(
-                    "SELECT MAX(version) AS version FROM schema_migrations"
-                ).fetchone()
-                if row is not None and row["version"] is not None:
-                    version = int(row["version"])
-                    if version > SCHEMA_VERSION:
-                        raise RepositoryCorruption("unsupported schema version")
-            connection.executescript(_SCHEMA)
+        with _SCHEMA_INITIALIZATION_LOCK:
+            self._initialize_schema_locked()
+
+    def _initialize_schema_locked(self) -> None:
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = self._connect()
+            connection.execute("BEGIN IMMEDIATE")
+            self._require_supported_schema(connection)
+            for statement in _SCHEMA_STATEMENTS:
+                connection.execute(statement)
             connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations (version, applied_at) "
                 "VALUES (?, ?)",
-                (SCHEMA_VERSION, _datetime_text(datetime.now().astimezone())),
+                (SCHEMA_VERSION, _datetime_text(datetime.now(UTC))),
             )
+            connection.commit()
+        except RepositoryCorruption:
+            if connection is not None:
+                self._rollback_quietly(connection)
+            raise
+        except sqlite3.Error:
+            if connection is not None:
+                self._rollback_quietly(connection)
+            raise RepositoryCorruption("schema initialization failed") from None
+        finally:
+            if connection is not None:
+                connection.close()
+
+    @staticmethod
+    def _require_supported_schema(connection: sqlite3.Connection) -> None:
+        migration_table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?",
+            ("table", "schema_migrations"),
+        ).fetchone()
+        if migration_table is None:
+            return
+        row = connection.execute(
+            "SELECT MAX(version) AS version FROM schema_migrations"
+        ).fetchone()
+        if row is None or row["version"] is None:
+            return
+        try:
+            version = int(row["version"])
+        except (TypeError, ValueError):
+            raise RepositoryCorruption("invalid schema version") from None
+        if version > SCHEMA_VERSION:
+            raise RepositoryCorruption("unsupported schema version")
+
+    @staticmethod
+    def _rollback_quietly(connection: sqlite3.Connection) -> None:
+        try:
+            connection.rollback()
+        except sqlite3.Error:
+            pass
 
     def ingest_event(
         self,
@@ -184,9 +232,11 @@ class SQLiteRepository:
         ingested_at: datetime,
         raw_expires_at: datetime,
     ) -> RawEventReceipt:
-        connection = self._connect()
+        connection: sqlite3.Connection | None = None
         try:
+            connection = self._connect()
             connection.execute("BEGIN IMMEDIATE")
+            self._require_supported_schema(connection)
             tombstone = connection.execute(
                 "SELECT 1 FROM tombstones WHERE tenant_id = ? AND owner_id = ? "
                 "AND subject_id = ? AND entity_type = ? AND entity_id = ?",
@@ -210,15 +260,16 @@ class SQLiteRepository:
                 (*_scope_values(draft.scope), draft.event_id),
             ).fetchone()
             if existing is not None:
+                receipt = self._receipt(existing)
                 if not self._is_identical(
-                    existing,
+                    receipt,
                     draft,
                     content_hash=content_hash,
                     raw_expires_at=raw_expires_at,
                 ):
                     raise IdempotencyConflict(draft.event_id)
                 connection.commit()
-                return self._receipt(existing)
+                return receipt
 
             scope = _scope_values(draft.scope)
             self._insert_audit(connection, draft, ingested_at)
@@ -258,40 +309,42 @@ class SQLiteRepository:
                 (*scope, draft.event_id),
             ).fetchone()
             if row is None:
-                raise RuntimeError("inserted raw event is missing")
+                raise RepositoryCorruption("inserted raw event missing")
+            receipt = self._receipt(row)
             connection.commit()
-            return self._receipt(row)
+            return receipt
+        except (EntityDeleted, IdempotencyConflict, RepositoryCorruption):
+            if connection is not None:
+                self._rollback_quietly(connection)
+            raise
+        except sqlite3.Error:
+            if connection is not None:
+                self._rollback_quietly(connection)
+            raise RepositoryCorruption("event ingest failed") from None
         except BaseException:
-            connection.rollback()
+            if connection is not None:
+                self._rollback_quietly(connection)
             raise
         finally:
-            connection.close()
+            if connection is not None:
+                connection.close()
 
     @staticmethod
     def _is_identical(
-        row: sqlite3.Row,
+        receipt: RawEventReceipt,
         draft: RawEventDraft,
         *,
         content_hash: str,
         raw_expires_at: datetime,
     ) -> bool:
         return (
-            tuple(str(row[key]) for key in ("tenant_id", "owner_id", "subject_id"))
-            == _scope_values(draft.scope)
-            and str(row["source_id"]) == draft.source.source_id
-            and str(row["source_type"]) == draft.source.source_type
-            and str(row["source_occurred_at"])
-            == _datetime_text(draft.source.occurred_at)
-            and int(row["source_trust"]) == int(draft.source.trust)
-            and str(row["source_metadata_json"])
-            == _canonical_json(draft.source.metadata)
-            and str(row["content_hash"]) == content_hash
-            and str(row["raw_expires_at"]) == _datetime_text(raw_expires_at)
-            and int(row["clear_for_microseconds"])
-            == _timedelta_microseconds(draft.retention.clear_for)
-            and int(row["recall_for_microseconds"])
-            == _timedelta_microseconds(draft.retention.recall_for)
-            and str(row["event_metadata_json"]) == _canonical_json(draft.metadata)
+            receipt.scope == draft.scope
+            and receipt.source == draft.source
+            and receipt.content_hash == content_hash
+            and receipt.raw_expires_at == raw_expires_at
+            and receipt.clear_for == draft.retention.clear_for
+            and receipt.recall_for == draft.retention.recall_for
+            and receipt.metadata == draft.metadata
         )
 
     @staticmethod
@@ -319,25 +372,99 @@ class SQLiteRepository:
 
     @staticmethod
     def _receipt(row: sqlite3.Row) -> RawEventReceipt:
-        return RawEventReceipt(
-            event_id=str(row["event_id"]),
-            scope=Scope(
-                str(row["tenant_id"]),
-                str(row["owner_id"]),
-                str(row["subject_id"]),
-            ),
-            source=SourceRef(
-                source_id=str(row["source_id"]),
-                source_type=str(row["source_type"]),
-                occurred_at=datetime.fromisoformat(str(row["source_occurred_at"])),
-                trust=TrustLevel(int(row["source_trust"])),
-                metadata=json.loads(str(row["source_metadata_json"])),
-            ),
-            content_hash=str(row["content_hash"]),
-            ingested_at=datetime.fromisoformat(str(row["ingested_at"])),
-            raw_expires_at=datetime.fromisoformat(str(row["raw_expires_at"])),
-            clear_for=timedelta(microseconds=int(row["clear_for_microseconds"])),
-            recall_for=timedelta(microseconds=int(row["recall_for_microseconds"])),
-            content_available=bool(row["content_available"]),
-            metadata=json.loads(str(row["event_metadata_json"])),
-        )
+        try:
+            source_occurred_at = SQLiteRepository._stored_datetime(
+                row, "source_occurred_at"
+            )
+            ingested_at = SQLiteRepository._stored_datetime(row, "ingested_at")
+            raw_expires_at = SQLiteRepository._stored_datetime(row, "raw_expires_at")
+            source_metadata = SQLiteRepository._stored_metadata(
+                row, "source_metadata_json"
+            )
+            event_metadata = SQLiteRepository._stored_metadata(
+                row, "event_metadata_json"
+            )
+            content_hash = SQLiteRepository._stored_text(row, "content_hash")
+            if len(content_hash) != 64 or any(
+                character not in "0123456789abcdef" for character in content_hash
+            ):
+                raise ValueError
+            if SQLiteRepository._stored_text(row, "status") != "active":
+                raise ValueError
+            content_available = row["content_available"]
+            if type(content_available) is not int or content_available not in (0, 1):
+                raise TypeError
+            return RawEventReceipt(
+                event_id=SQLiteRepository._stored_text(row, "event_id"),
+                scope=Scope(
+                    SQLiteRepository._stored_text(row, "tenant_id"),
+                    SQLiteRepository._stored_text(row, "owner_id"),
+                    SQLiteRepository._stored_text(row, "subject_id"),
+                ),
+                source=SourceRef(
+                    source_id=SQLiteRepository._stored_text(row, "source_id"),
+                    source_type=SQLiteRepository._stored_text(row, "source_type"),
+                    occurred_at=source_occurred_at,
+                    trust=TrustLevel(
+                        SQLiteRepository._stored_integer(row, "source_trust")
+                    ),
+                    metadata=source_metadata,
+                ),
+                content_hash=content_hash,
+                ingested_at=ingested_at,
+                raw_expires_at=raw_expires_at,
+                clear_for=timedelta(
+                    microseconds=SQLiteRepository._stored_integer(
+                        row, "clear_for_microseconds"
+                    )
+                ),
+                recall_for=timedelta(
+                    microseconds=SQLiteRepository._stored_integer(
+                        row, "recall_for_microseconds"
+                    )
+                ),
+                content_available=bool(content_available),
+                metadata=event_metadata,
+            )
+        except (
+            IndexError,
+            KeyError,
+            OverflowError,
+            TypeError,
+            ValueError,
+            ValidationError,
+        ):
+            raise RepositoryCorruption("invalid raw event record") from None
+
+    @staticmethod
+    def _stored_text(row: sqlite3.Row, key: str) -> str:
+        value = row[key]
+        if type(value) is not str:
+            raise TypeError
+        return value
+
+    @staticmethod
+    def _stored_integer(row: sqlite3.Row, key: str) -> int:
+        value = row[key]
+        if type(value) is not int:
+            raise TypeError
+        return value
+
+    @staticmethod
+    def _stored_datetime(row: sqlite3.Row, key: str) -> datetime:
+        text = SQLiteRepository._stored_text(row, key)
+        value = datetime.fromisoformat(text)
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError
+        normalized = value.astimezone(UTC)
+        if _datetime_text(normalized) != text:
+            raise ValueError
+        return normalized
+
+    @staticmethod
+    def _stored_metadata(row: sqlite3.Row, key: str) -> dict[str, JsonValue]:
+        text = SQLiteRepository._stored_text(row, key)
+        value = json.loads(text)
+        if not isinstance(value, dict) or _canonical_json(value) != text:
+            raise ValueError
+        return cast(dict[str, JsonValue], value)
