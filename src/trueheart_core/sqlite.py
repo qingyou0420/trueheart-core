@@ -36,7 +36,50 @@ from .ports import _dependency_fingerprint
 
 SCHEMA_VERSION = 1
 
-_SCHEMA = """
+_CURRENT_MEMORY_SOURCES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS memory_sources (
+    tenant_id TEXT NOT NULL,
+    owner_id TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    memory_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    source_trust_snapshot INTEGER NOT NULL
+        CHECK (source_trust_snapshot BETWEEN 0 AND 2),
+    clear_for_microseconds_snapshot INTEGER NOT NULL
+        CHECK (clear_for_microseconds_snapshot > 0),
+    recall_for_microseconds_snapshot INTEGER NOT NULL
+        CHECK (recall_for_microseconds_snapshot >= clear_for_microseconds_snapshot),
+    PRIMARY KEY (tenant_id, owner_id, subject_id, memory_id, event_id),
+    FOREIGN KEY (tenant_id, owner_id, subject_id, memory_id)
+        REFERENCES memories (tenant_id, owner_id, subject_id, memory_id)
+        ON DELETE CASCADE,
+    FOREIGN KEY (tenant_id, owner_id, subject_id, event_id)
+        REFERENCES raw_events (tenant_id, owner_id, subject_id, event_id)
+)
+""".strip()
+
+_LEGACY_MEMORY_SOURCES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS memory_sources (
+    tenant_id TEXT NOT NULL,
+    owner_id TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    memory_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, owner_id, subject_id, memory_id, event_id),
+    FOREIGN KEY (tenant_id, owner_id, subject_id, memory_id)
+        REFERENCES memories (tenant_id, owner_id, subject_id, memory_id)
+        ON DELETE CASCADE,
+    FOREIGN KEY (tenant_id, owner_id, subject_id, event_id)
+        REFERENCES raw_events (tenant_id, owner_id, subject_id, event_id)
+)
+""".strip()
+
+_MEMORY_SOURCES_INDEX_SCHEMA = (
+    "CREATE INDEX IF NOT EXISTS idx_memory_sources_event "
+    "ON memory_sources (tenant_id, owner_id, subject_id, event_id)"
+)
+
+_SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
     applied_at TEXT NOT NULL
@@ -91,25 +134,7 @@ CREATE TABLE IF NOT EXISTS memories (
     PRIMARY KEY (tenant_id, owner_id, subject_id, memory_id)
 );
 
-CREATE TABLE IF NOT EXISTS memory_sources (
-    tenant_id TEXT NOT NULL,
-    owner_id TEXT NOT NULL,
-    subject_id TEXT NOT NULL,
-    memory_id TEXT NOT NULL,
-    event_id TEXT NOT NULL,
-    source_trust_snapshot INTEGER NOT NULL
-        CHECK (source_trust_snapshot BETWEEN 0 AND 2),
-    clear_for_microseconds_snapshot INTEGER NOT NULL
-        CHECK (clear_for_microseconds_snapshot > 0),
-    recall_for_microseconds_snapshot INTEGER NOT NULL
-        CHECK (recall_for_microseconds_snapshot >= clear_for_microseconds_snapshot),
-    PRIMARY KEY (tenant_id, owner_id, subject_id, memory_id, event_id),
-    FOREIGN KEY (tenant_id, owner_id, subject_id, memory_id)
-        REFERENCES memories (tenant_id, owner_id, subject_id, memory_id)
-        ON DELETE CASCADE,
-    FOREIGN KEY (tenant_id, owner_id, subject_id, event_id)
-        REFERENCES raw_events (tenant_id, owner_id, subject_id, event_id)
-);
+{_CURRENT_MEMORY_SOURCES_SCHEMA};
 
 CREATE TABLE IF NOT EXISTS tombstones (
     tenant_id TEXT NOT NULL,
@@ -139,8 +164,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
 
 CREATE INDEX IF NOT EXISTS idx_audit_scope_time
     ON audit_log (tenant_id, owner_id, subject_id, occurred_at);
-CREATE INDEX IF NOT EXISTS idx_memory_sources_event
-    ON memory_sources (tenant_id, owner_id, subject_id, event_id);
+{_MEMORY_SOURCES_INDEX_SCHEMA};
 """
 
 _SCHEMA_STATEMENTS = tuple(
@@ -217,6 +241,7 @@ class SQLiteRepository:
             self._require_supported_schema(connection)
             for statement in _SCHEMA_STATEMENTS:
                 connection.execute(statement)
+            self._migrate_legacy_memory_sources(connection)
             connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations (version, applied_at) "
                 "VALUES (?, ?)",
@@ -234,6 +259,63 @@ class SQLiteRepository:
         finally:
             if connection is not None:
                 connection.close()
+
+    @staticmethod
+    def _normalized_schema_sql(value: str) -> str:
+        normalized = " ".join(value.replace("IF NOT EXISTS ", "").split())
+        return normalized.replace("( ", "(").replace(" )", ")").removesuffix(";")
+
+    @classmethod
+    def _migrate_legacy_memory_sources(cls, connection: sqlite3.Connection) -> None:
+        row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = ? AND name = ?",
+            ("table", "memory_sources"),
+        ).fetchone()
+        if row is None or type(row["sql"]) is not str:
+            raise RepositoryCorruption("invalid memory_sources schema")
+        stored_schema = cls._normalized_schema_sql(row["sql"])
+        current_schema = cls._normalized_schema_sql(_CURRENT_MEMORY_SOURCES_SCHEMA)
+        if stored_schema == current_schema:
+            return
+        legacy_schema = cls._normalized_schema_sql(_LEGACY_MEMORY_SOURCES_SCHEMA)
+        if stored_schema != legacy_schema:
+            raise RepositoryCorruption("unsupported memory_sources schema")
+
+        count_row = connection.execute(
+            "SELECT COUNT(*) AS row_count FROM memory_sources"
+        ).fetchone()
+        if count_row is None or type(count_row["row_count"]) is not int:
+            raise RepositoryCorruption("legacy lineage migration failed")
+        legacy_count = count_row["row_count"]
+        connection.execute("DROP INDEX IF EXISTS idx_memory_sources_event")
+        connection.execute(
+            "ALTER TABLE memory_sources RENAME TO memory_sources_legacy_v1"
+        )
+        connection.execute(_CURRENT_MEMORY_SOURCES_SCHEMA)
+        connection.execute(
+            "INSERT INTO memory_sources (tenant_id, owner_id, subject_id, "
+            "memory_id, event_id, source_trust_snapshot, "
+            "clear_for_microseconds_snapshot, recall_for_microseconds_snapshot) "
+            "SELECT legacy.tenant_id, legacy.owner_id, legacy.subject_id, "
+            "legacy.memory_id, legacy.event_id, receipts.source_trust, "
+            "receipts.clear_for_microseconds, receipts.recall_for_microseconds "
+            "FROM memory_sources_legacy_v1 AS legacy "
+            "JOIN raw_events AS receipts ON receipts.tenant_id = legacy.tenant_id "
+            "AND receipts.owner_id = legacy.owner_id "
+            "AND receipts.subject_id = legacy.subject_id "
+            "AND receipts.event_id = legacy.event_id"
+        )
+        migrated_count_row = connection.execute(
+            "SELECT COUNT(*) AS row_count FROM memory_sources"
+        ).fetchone()
+        if (
+            migrated_count_row is None
+            or type(migrated_count_row["row_count"]) is not int
+            or migrated_count_row["row_count"] != legacy_count
+        ):
+            raise RepositoryCorruption("legacy lineage migration failed")
+        connection.execute("DROP TABLE memory_sources_legacy_v1")
+        connection.execute(_MEMORY_SOURCES_INDEX_SCHEMA)
 
     @staticmethod
     def _require_supported_schema(connection: sqlite3.Connection) -> None:
@@ -714,18 +796,21 @@ class SQLiteRepository:
                 "AND edges.subject_id = ? ORDER BY edges.memory_id, edges.event_id",
                 scope_values,
             ).fetchall()
-            sources_by_memory: dict[str, list[sqlite3.Row]] = {}
-            for source_row in source_rows:
-                memory_id = self._stored_text(source_row, "memory_id")
-                sources_by_memory.setdefault(memory_id, []).append(source_row)
-            records: list[MemoryRecord] = []
-            memory_ids: set[str] = set()
-            for row in rows:
-                memory_id = self._stored_text(row, "memory_id")
-                memory_ids.add(memory_id)
-                records.append(
-                    self._memory_record(row, sources_by_memory.get(memory_id, []))
-                )
+            try:
+                sources_by_memory: dict[str, list[sqlite3.Row]] = {}
+                for source_row in source_rows:
+                    memory_id = self._stored_text(source_row, "memory_id")
+                    sources_by_memory.setdefault(memory_id, []).append(source_row)
+                records: list[MemoryRecord] = []
+                memory_ids: set[str] = set()
+                for row in rows:
+                    memory_id = self._stored_text(row, "memory_id")
+                    memory_ids.add(memory_id)
+                    records.append(
+                        self._memory_record(row, sources_by_memory.get(memory_id, []))
+                    )
+            except (IndexError, KeyError, TypeError, ValueError, ValidationError):
+                raise RepositoryCorruption("invalid memory record") from None
             if set(sources_by_memory) != memory_ids:
                 raise RepositoryCorruption("invalid memory record")
             eligible = tuple(

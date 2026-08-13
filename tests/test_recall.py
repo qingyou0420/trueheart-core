@@ -498,3 +498,30 @@ def test_recall_validates_corrupt_kind_before_optional_kind_filter(
 
     assert "private-kind-sentinel" not in str(error.value)
     assert error.value.__cause__ is None
+
+
+def test_recall_translates_corrupt_lineage_grouping_key_without_body(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "corrupt-lineage-group.db"
+    service = _service(path)
+    created = datetime(2026, 8, 13, 9, tzinfo=UTC)
+    _add_memory(
+        service,
+        memory_id="mem-group",
+        event_id="evt-group",
+        created_at=created,
+    )
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute(
+            "UPDATE memory_sources SET memory_id = ? WHERE memory_id = ?",
+            (sqlite3.Binary(b"private-grouping-sentinel"), "mem-group"),
+        )
+
+    with pytest.raises(RepositoryCorruption) as error:
+        service.recall(RecallQuery(scope=SCOPE, as_of=created))
+
+    assert "private-grouping-sentinel" not in str(error.value)
+    assert "raw private synthetic body" not in str(error.value)
+    assert error.value.__cause__ is None

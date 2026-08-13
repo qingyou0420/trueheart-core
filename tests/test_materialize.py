@@ -12,6 +12,7 @@ from trueheart_core import (
     MemoryDraft,
     MemoryStatus,
     RawEventDraft,
+    RecallQuery,
     RepositoryCorruption,
     RetentionPolicy,
     Scope,
@@ -98,6 +99,36 @@ def _ingest_sources(service: TrueHeart) -> None:
             recall_for=timedelta(days=8),
         )
     )
+
+
+def _replace_lineage_with_legacy_v1(path: Path) -> None:
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute(
+            "ALTER TABLE memory_sources RENAME TO memory_sources_current_fixture"
+        )
+        connection.execute(
+            "CREATE TABLE memory_sources ("
+            "tenant_id TEXT NOT NULL, owner_id TEXT NOT NULL, "
+            "subject_id TEXT NOT NULL, memory_id TEXT NOT NULL, "
+            "event_id TEXT NOT NULL, "
+            "PRIMARY KEY (tenant_id, owner_id, subject_id, memory_id, event_id), "
+            "FOREIGN KEY (tenant_id, owner_id, subject_id, memory_id) "
+            "REFERENCES memories (tenant_id, owner_id, subject_id, memory_id) "
+            "ON DELETE CASCADE, "
+            "FOREIGN KEY (tenant_id, owner_id, subject_id, event_id) "
+            "REFERENCES raw_events (tenant_id, owner_id, subject_id, event_id))"
+        )
+        connection.execute(
+            "INSERT INTO memory_sources "
+            "SELECT tenant_id, owner_id, subject_id, memory_id, event_id "
+            "FROM memory_sources_current_fixture"
+        )
+        connection.execute("DROP TABLE memory_sources_current_fixture")
+        connection.execute(
+            "CREATE INDEX idx_memory_sources_event "
+            "ON memory_sources (tenant_id, owner_id, subject_id, event_id)"
+        )
 
 
 def test_materialize_requires_at_least_one_source() -> None:
@@ -352,3 +383,102 @@ def test_tombstoned_id_or_dependency_fingerprint_cannot_rematerialize(
 
     with sqlite3.connect(path) as connection:
         assert connection.execute("SELECT COUNT(*) FROM memories").fetchone() == (0,)
+
+
+def test_legacy_v1_lineage_is_atomically_migrated_and_remains_recallable(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "legacy-lineage.db"
+    service = _service(path)
+    _ingest_sources(service)
+    original = service.materialize_once(_memory())
+    _replace_lineage_with_legacy_v1(path)
+
+    migrated = _service(path)
+    recalled = migrated.recall(RecallQuery(scope=SCOPE, as_of=CREATED_AT))
+    replayed = migrated.materialize_once(_memory())
+
+    assert replayed == original
+    assert tuple(item.memory for item in recalled) == (original,)
+    with sqlite3.connect(path) as connection:
+        columns = connection.execute("PRAGMA table_info(memory_sources)").fetchall()
+        assert [column[1] for column in columns] == [
+            "tenant_id",
+            "owner_id",
+            "subject_id",
+            "memory_id",
+            "event_id",
+            "source_trust_snapshot",
+            "clear_for_microseconds_snapshot",
+            "recall_for_microseconds_snapshot",
+        ]
+        table_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = ? AND name = ?",
+            ("table", "memory_sources"),
+        ).fetchone()[0]
+        assert "CHECK (source_trust_snapshot BETWEEN 0 AND 2)" in table_sql
+        assert "CHECK (clear_for_microseconds_snapshot > 0)" in table_sql
+        assert (
+            "CHECK (recall_for_microseconds_snapshot >= "
+            "clear_for_microseconds_snapshot)" in table_sql
+        )
+        index_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = ? AND name = ?",
+            ("index", "idx_memory_sources_event"),
+        ).fetchone()[0]
+        assert "ON memory_sources" in index_sql
+        assert connection.execute(
+            "SELECT version FROM schema_migrations"
+        ).fetchall() == [(1,)]
+        assert connection.execute(
+            "SELECT source_trust_snapshot, clear_for_microseconds_snapshot, "
+            "recall_for_microseconds_snapshot FROM memory_sources "
+            "ORDER BY event_id"
+        ).fetchall() == [
+            (int(TrustLevel.OBSERVED), 345_600_000_000, 518_400_000_000),
+            (int(TrustLevel.CONFIRMED), 172_800_000_000, 691_200_000_000),
+        ]
+
+
+def test_legacy_v1_lineage_migration_failure_rolls_back_original_table(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "legacy-lineage-rollback.db"
+    service = _service(path)
+    _ingest_sources(service)
+    service.materialize_once(_memory())
+    _replace_lineage_with_legacy_v1(path)
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute(
+            "DELETE FROM raw_events WHERE tenant_id = ? AND owner_id = ? "
+            "AND subject_id = ? AND event_id = ?",
+            ("tenant", "owner", "subject", "evt-2"),
+        )
+
+    with pytest.raises(RepositoryCorruption) as error:
+        SQLiteRepository(path)
+
+    assert error.value.__cause__ is None
+    with sqlite3.connect(path) as connection:
+        assert [
+            column[1]
+            for column in connection.execute("PRAGMA table_info(memory_sources)")
+        ] == ["tenant_id", "owner_id", "subject_id", "memory_id", "event_id"]
+        assert connection.execute("SELECT COUNT(*) FROM memory_sources").fetchone() == (
+            2,
+        )
+        assert (
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = ? AND name = ?",
+                ("table", "memory_sources_legacy_v1"),
+            ).fetchone()
+            is None
+        )
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = ? AND name = ?",
+            ("index", "idx_memory_sources_event"),
+        ).fetchone() == ("idx_memory_sources_event",)
+        assert connection.execute(
+            "SELECT version FROM schema_migrations"
+        ).fetchall() == [(1,)]
