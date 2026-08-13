@@ -13,6 +13,9 @@ from uuid import uuid4
 from .domain import (
     EntityType,
     JsonValue,
+    MemoryDraft,
+    MemoryRecord,
+    MemoryStatus,
     RawEventDraft,
     RawEventReceipt,
     Scope,
@@ -22,10 +25,14 @@ from .domain import (
 )
 from .errors import (
     EntityDeleted,
+    EntityNotFound,
     IdempotencyConflict,
     RepositoryCorruption,
+    ScopeMismatch,
+    TrustEscalation,
     ValidationError,
 )
+from .ports import _dependency_fingerprint
 
 SCHEMA_VERSION = 1
 
@@ -371,6 +378,326 @@ class SQLiteRepository:
             and receipt.recall_for == draft.retention.recall_for
             and receipt.metadata == draft.metadata
         )
+
+    def materialize_once(
+        self,
+        draft: MemoryDraft,
+        *,
+        dependency_fingerprint: str,
+    ) -> MemoryRecord:
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = self._connect()
+            connection.execute("BEGIN IMMEDIATE")
+            self._require_supported_schema(connection)
+            scope = _scope_values(draft.scope)
+
+            identifier_tombstone = connection.execute(
+                "SELECT 1 FROM tombstones WHERE tenant_id = ? AND owner_id = ? "
+                "AND subject_id = ? AND entity_type = ? AND entity_id = ?",
+                (*scope, EntityType.MEMORY.value, draft.memory_id),
+            ).fetchone()
+            if identifier_tombstone is not None:
+                raise EntityDeleted(draft.memory_id)
+            fingerprint_tombstone = connection.execute(
+                "SELECT 1 FROM tombstones WHERE tenant_id = ? AND owner_id = ? "
+                "AND subject_id = ? AND entity_type = ? "
+                "AND dependency_fingerprint = ?",
+                (*scope, EntityType.MEMORY.value, dependency_fingerprint),
+            ).fetchone()
+            if fingerprint_tombstone is not None:
+                raise EntityDeleted(draft.memory_id)
+
+            source_receipts: list[RawEventReceipt] = []
+            for event_id in draft.source_event_ids:
+                row = connection.execute(
+                    "SELECT raw_events.*, "
+                    "EXISTS(SELECT 1 FROM raw_event_content AS content "
+                    "WHERE content.tenant_id = raw_events.tenant_id "
+                    "AND content.owner_id = raw_events.owner_id "
+                    "AND content.subject_id = raw_events.subject_id "
+                    "AND content.event_id = raw_events.event_id) AS content_available "
+                    "FROM raw_events WHERE tenant_id = ? AND owner_id = ? "
+                    "AND subject_id = ? AND event_id = ?",
+                    (*scope, event_id),
+                ).fetchone()
+                if row is None:
+                    deleted = connection.execute(
+                        "SELECT 1 FROM tombstones WHERE tenant_id = ? "
+                        "AND owner_id = ? AND subject_id = ? AND entity_type = ? "
+                        "AND entity_id = ?",
+                        (*scope, EntityType.RAW_EVENT.value, event_id),
+                    ).fetchone()
+                    if deleted is not None:
+                        raise EntityDeleted(event_id)
+                    other_scope = connection.execute(
+                        "SELECT 1 FROM raw_events WHERE event_id = ? LIMIT 1",
+                        (event_id,),
+                    ).fetchone()
+                    if other_scope is not None:
+                        raise ScopeMismatch(event_id)
+                    raise EntityNotFound(event_id)
+                source_receipts.append(self._receipt(row))
+
+            minimum_trust = min(receipt.source.trust for receipt in source_receipts)
+            if draft.trust > minimum_trust:
+                raise TrustEscalation(draft.memory_id)
+            shortest_clear_for = min(receipt.clear_for for receipt in source_receipts)
+            shortest_recall_for = min(receipt.recall_for for receipt in source_receipts)
+            clear_until = draft.created_at + shortest_clear_for
+            recall_until = draft.created_at + shortest_recall_for
+
+            existing = connection.execute(
+                "SELECT * FROM memories WHERE tenant_id = ? AND owner_id = ? "
+                "AND subject_id = ? AND memory_id = ?",
+                (*scope, draft.memory_id),
+            ).fetchone()
+            if existing is not None:
+                record = self._memory_record(connection, existing)
+                if not self._is_identical_memory(
+                    record,
+                    draft,
+                    dependency_fingerprint=dependency_fingerprint,
+                    clear_until=clear_until,
+                    recall_until=recall_until,
+                ):
+                    raise IdempotencyConflict(draft.memory_id)
+                connection.commit()
+                return record
+
+            connection.execute(
+                "INSERT INTO memories (tenant_id, owner_id, subject_id, memory_id, "
+                "content, dependency_fingerprint, kind, trust, created_at, "
+                "clear_until, recall_until, status, metadata_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    *scope,
+                    draft.memory_id,
+                    draft.content,
+                    dependency_fingerprint,
+                    draft.kind,
+                    int(draft.trust),
+                    _datetime_text(draft.created_at),
+                    _datetime_text(clear_until),
+                    _datetime_text(recall_until),
+                    MemoryStatus.ACTIVE.value,
+                    _canonical_json(draft.metadata),
+                ),
+            )
+            for event_id in sorted(draft.source_event_ids):
+                connection.execute(
+                    "INSERT INTO memory_sources (tenant_id, owner_id, subject_id, "
+                    "memory_id, event_id) VALUES (?, ?, ?, ?, ?)",
+                    (*scope, draft.memory_id, event_id),
+                )
+            self._insert_materialize_audit(connection, draft)
+            inserted = connection.execute(
+                "SELECT * FROM memories WHERE tenant_id = ? AND owner_id = ? "
+                "AND subject_id = ? AND memory_id = ?",
+                (*scope, draft.memory_id),
+            ).fetchone()
+            if inserted is None:
+                raise RepositoryCorruption("inserted memory missing")
+            record = self._memory_record(connection, inserted)
+            connection.commit()
+            return record
+        except (
+            EntityDeleted,
+            EntityNotFound,
+            IdempotencyConflict,
+            RepositoryCorruption,
+            ScopeMismatch,
+            TrustEscalation,
+        ):
+            if connection is not None:
+                self._rollback_quietly(connection)
+            raise
+        except sqlite3.Error:
+            if connection is not None:
+                self._rollback_quietly(connection)
+            raise RepositoryCorruption("memory materialization failed") from None
+        except BaseException:
+            if connection is not None:
+                self._rollback_quietly(connection)
+            raise
+        finally:
+            if connection is not None:
+                connection.close()
+
+    @staticmethod
+    def _is_identical_memory(
+        record: MemoryRecord,
+        draft: MemoryDraft,
+        *,
+        dependency_fingerprint: str,
+        clear_until: datetime,
+        recall_until: datetime,
+    ) -> bool:
+        return (
+            record.scope == draft.scope
+            and record.content == draft.content
+            and record.source_event_ids == tuple(sorted(draft.source_event_ids))
+            and record.dependency_fingerprint == dependency_fingerprint
+            and record.kind == draft.kind
+            and record.trust == draft.trust
+            and record.created_at == draft.created_at
+            and record.clear_until == clear_until
+            and record.recall_until == recall_until
+            and record.metadata == draft.metadata
+        )
+
+    @staticmethod
+    def _insert_materialize_audit(
+        connection: sqlite3.Connection, draft: MemoryDraft
+    ) -> None:
+        connection.execute(
+            "INSERT INTO audit_log (audit_id, tenant_id, owner_id, subject_id, "
+            "action, entity_type, entity_id, occurred_at, reason, metadata_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                str(uuid4()),
+                *_scope_values(draft.scope),
+                "materialize",
+                EntityType.MEMORY.value,
+                draft.memory_id,
+                _datetime_text(draft.created_at),
+                "memory materialized",
+                "{}",
+            ),
+        )
+
+    @staticmethod
+    def _memory_record(
+        connection: sqlite3.Connection, row: sqlite3.Row
+    ) -> MemoryRecord:
+        try:
+            scope = Scope(
+                SQLiteRepository._stored_text(row, "tenant_id"),
+                SQLiteRepository._stored_text(row, "owner_id"),
+                SQLiteRepository._stored_text(row, "subject_id"),
+            )
+            memory_id = SQLiteRepository._stored_text(row, "memory_id")
+            source_rows = connection.execute(
+                "SELECT edges.event_id, receipts.event_id AS receipt_event_id, "
+                "receipts.source_trust AS receipt_trust, "
+                "receipts.clear_for_microseconds AS receipt_clear_for_microseconds, "
+                "receipts.recall_for_microseconds AS receipt_recall_for_microseconds "
+                "FROM memory_sources AS edges LEFT JOIN raw_events AS receipts "
+                "ON receipts.tenant_id = edges.tenant_id "
+                "AND receipts.owner_id = edges.owner_id "
+                "AND receipts.subject_id = edges.subject_id "
+                "AND receipts.event_id = edges.event_id "
+                "WHERE edges.tenant_id = ? AND edges.owner_id = ? "
+                "AND edges.subject_id = ? AND edges.memory_id = ? "
+                "ORDER BY edges.event_id",
+                (*_scope_values(scope), memory_id),
+            ).fetchall()
+            source_event_ids_list: list[str] = []
+            source_trusts: list[TrustLevel] = []
+            source_clear_periods: list[timedelta] = []
+            source_recall_periods: list[timedelta] = []
+            for source_row in source_rows:
+                event_id = SQLiteRepository._stored_text(source_row, "event_id")
+                if (
+                    SQLiteRepository._stored_text(source_row, "receipt_event_id")
+                    != event_id
+                ):
+                    raise ValueError
+                source_event_ids_list.append(event_id)
+                source_trusts.append(
+                    TrustLevel(
+                        SQLiteRepository._stored_integer(source_row, "receipt_trust")
+                    )
+                )
+                clear_period = timedelta(
+                    microseconds=SQLiteRepository._stored_integer(
+                        source_row, "receipt_clear_for_microseconds"
+                    )
+                )
+                recall_period = timedelta(
+                    microseconds=SQLiteRepository._stored_integer(
+                        source_row, "receipt_recall_for_microseconds"
+                    )
+                )
+                if clear_period <= timedelta(0) or recall_period < clear_period:
+                    raise ValueError
+                source_clear_periods.append(clear_period)
+                source_recall_periods.append(recall_period)
+            source_event_ids = tuple(source_event_ids_list)
+            kind = SQLiteRepository._stored_text(row, "kind")
+            dependency_fingerprint = SQLiteRepository._stored_text(
+                row, "dependency_fingerprint"
+            )
+            if dependency_fingerprint != _dependency_fingerprint(
+                scope, kind, source_event_ids
+            ):
+                raise ValueError
+            trust = TrustLevel(SQLiteRepository._stored_integer(row, "trust"))
+            created_at = SQLiteRepository._stored_datetime(row, "created_at")
+            clear_until = SQLiteRepository._stored_datetime(row, "clear_until")
+            recall_until = SQLiteRepository._stored_datetime(row, "recall_until")
+            if trust > min(source_trusts):
+                raise ValueError
+            if clear_until != created_at + min(source_clear_periods):
+                raise ValueError
+            if recall_until != created_at + min(source_recall_periods):
+                raise ValueError
+            return MemoryRecord(
+                memory_id=memory_id,
+                scope=scope,
+                content=SQLiteRepository._stored_text(row, "content"),
+                source_event_ids=source_event_ids,
+                dependency_fingerprint=dependency_fingerprint,
+                kind=kind,
+                trust=trust,
+                created_at=created_at,
+                clear_until=clear_until,
+                recall_until=recall_until,
+                status=MemoryStatus(SQLiteRepository._stored_text(row, "status")),
+                metadata=SQLiteRepository._stored_metadata(row, "metadata_json"),
+            )
+        except (
+            IndexError,
+            KeyError,
+            OverflowError,
+            TypeError,
+            ValueError,
+            ValidationError,
+        ):
+            raise RepositoryCorruption("invalid memory record") from None
+
+    def recall_candidates(
+        self,
+        scope: Scope,
+        *,
+        as_of: datetime,
+        kinds: tuple[str, ...],
+    ) -> tuple[MemoryRecord, ...]:
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = self._connect()
+            statement = (
+                "SELECT * FROM memories WHERE tenant_id = ? AND owner_id = ? "
+                "AND subject_id = ? AND status = ? AND recall_until > ?"
+            )
+            values: list[object] = [
+                *_scope_values(scope),
+                MemoryStatus.ACTIVE.value,
+                _datetime_text(as_of),
+            ]
+            if kinds:
+                placeholders = ", ".join("?" for _ in kinds)
+                statement += f" AND kind IN ({placeholders})"
+                values.extend(kinds)
+            rows = connection.execute(statement, values).fetchall()
+            return tuple(self._memory_record(connection, row) for row in rows)
+        except RepositoryCorruption:
+            raise
+        except sqlite3.Error:
+            raise RepositoryCorruption("memory recall failed") from None
+        finally:
+            if connection is not None:
+                connection.close()
 
     @staticmethod
     def _insert_audit(

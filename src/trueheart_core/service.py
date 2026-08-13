@@ -6,8 +6,24 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from hashlib import sha256
 
-from .domain import RawEventDraft, RawEventReceipt, _normalize_datetime
-from .ports import Repository
+from .domain import (
+    MemoryDraft,
+    MemoryRecord,
+    RawEventDraft,
+    RawEventReceipt,
+    RecallItem,
+    RecallQuery,
+    _normalize_datetime,
+)
+from .ports import Repository, _dependency_fingerprint
+
+
+def _clarity(memory: MemoryRecord, as_of: datetime) -> float:
+    if as_of <= memory.clear_until:
+        return 1.0
+    fading_window = memory.recall_until - memory.clear_until
+    remaining = memory.recall_until - as_of
+    return remaining / fading_window
 
 
 class TrueHeart:
@@ -30,3 +46,27 @@ class TrueHeart:
             ingested_at=ingested_at,
             raw_expires_at=raw_expires_at,
         )
+
+    def materialize_once(self, draft: MemoryDraft) -> MemoryRecord:
+        dependency_fingerprint = _dependency_fingerprint(
+            draft.scope, draft.kind, draft.source_event_ids
+        )
+        return self._repository.materialize_once(
+            draft,
+            dependency_fingerprint=dependency_fingerprint,
+        )
+
+    def recall(self, query: RecallQuery) -> tuple[RecallItem, ...]:
+        candidates = self._repository.recall_candidates(
+            query.scope,
+            as_of=query.as_of,
+            kinds=query.kinds,
+        )
+        items = [
+            RecallItem(memory=memory, clarity=_clarity(memory, query.as_of))
+            for memory in candidates
+        ]
+        items.sort(key=lambda item: item.memory.memory_id)
+        items.sort(key=lambda item: item.memory.created_at, reverse=True)
+        items.sort(key=lambda item: item.clarity, reverse=True)
+        return tuple(items[: query.limit])
