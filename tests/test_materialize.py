@@ -482,3 +482,54 @@ def test_legacy_v1_lineage_migration_failure_rolls_back_original_table(
         assert connection.execute(
             "SELECT version FROM schema_migrations"
         ).fetchall() == [(1,)]
+
+
+@pytest.mark.parametrize(
+    "missing_table",
+    ["memory_sources", "raw_event_content"],
+    ids=["lineage-table", "another-core-table"],
+)
+def test_initialized_v1_missing_core_table_fails_without_repair(
+    tmp_path: Path,
+    missing_table: str,
+) -> None:
+    path = tmp_path / f"missing-{missing_table}.db"
+    SQLiteRepository(path)
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute(f"DROP TABLE {missing_table}")
+    original_bytes = path.read_bytes()
+    with sqlite3.connect(path) as connection:
+        original_schema = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
+        ).fetchall()
+
+    with pytest.raises(RepositoryCorruption) as error:
+        SQLiteRepository(path)
+
+    assert "private" not in str(error.value)
+    assert error.value.__cause__ is None
+    assert path.read_bytes() == original_bytes
+    with sqlite3.connect(path) as connection:
+        assert (
+            connection.execute(
+                "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
+            ).fetchall()
+            == original_schema
+        )
+        assert connection.execute(
+            "SELECT version FROM schema_migrations"
+        ).fetchall() == [(1,)]
+        assert (
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = ? AND name = ?",
+                ("table", missing_table),
+            ).fetchone()
+            is None
+        )
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE name IN (?, ?)",
+            ("memory_sources_legacy_v1", "idx_memory_sources_event"),
+        ).fetchall() == (
+            [] if missing_table == "memory_sources" else [("idx_memory_sources_event",)]
+        )

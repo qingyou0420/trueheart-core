@@ -35,6 +35,16 @@ from .errors import (
 from .ports import _dependency_fingerprint
 
 SCHEMA_VERSION = 1
+_CORE_TABLES = frozenset(
+    {
+        "raw_events",
+        "raw_event_content",
+        "memories",
+        "memory_sources",
+        "tombstones",
+        "audit_log",
+    }
+)
 
 _CURRENT_MEMORY_SOURCES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS memory_sources (
@@ -238,10 +248,13 @@ class SQLiteRepository:
         try:
             connection = self._connect()
             connection.execute("BEGIN IMMEDIATE")
-            self._require_supported_schema(connection)
+            fresh_schema = self._requires_fresh_schema(connection)
+            if not fresh_schema:
+                self._migrate_legacy_memory_sources(connection)
             for statement in _SCHEMA_STATEMENTS:
                 connection.execute(statement)
-            self._migrate_legacy_memory_sources(connection)
+            if fresh_schema:
+                self._migrate_legacy_memory_sources(connection)
             connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations (version, applied_at) "
                 "VALUES (?, ?)",
@@ -259,6 +272,44 @@ class SQLiteRepository:
         finally:
             if connection is not None:
                 connection.close()
+
+    @classmethod
+    def _requires_fresh_schema(cls, connection: sqlite3.Connection) -> bool:
+        table_rows = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = ?",
+            ("table",),
+        ).fetchall()
+        try:
+            table_names = {
+                cls._stored_text(table_row, "name") for table_row in table_rows
+            }
+        except (IndexError, KeyError, TypeError, ValueError):
+            raise RepositoryCorruption("invalid schema catalog") from None
+        if "schema_migrations" not in table_names:
+            if table_names & _CORE_TABLES:
+                raise RepositoryCorruption("incomplete schema")
+            return True
+
+        cls._require_supported_schema(connection)
+        version_rows = connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall()
+        if not version_rows:
+            if table_names & _CORE_TABLES:
+                raise RepositoryCorruption("incomplete schema")
+            return True
+        try:
+            versions = tuple(
+                cls._stored_integer(version_row, "version")
+                for version_row in version_rows
+            )
+        except (IndexError, KeyError, TypeError, ValueError):
+            raise RepositoryCorruption("invalid schema version") from None
+        if versions != (SCHEMA_VERSION,):
+            raise RepositoryCorruption("invalid schema version")
+        if not _CORE_TABLES.issubset(table_names):
+            raise RepositoryCorruption("incomplete schema")
+        return False
 
     @staticmethod
     def _normalized_schema_sql(value: str) -> str:
