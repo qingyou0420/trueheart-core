@@ -90,6 +90,33 @@ Parse all repository YAML with an available YAML parser, confirm every `uses:` i
 
 Commit exactly `ci: add trusted v0.1 release workflow`.
 
+### Task 2A: Complete and lock PyPI project metadata
+
+**Files:**
+- Modify: `pyproject.toml`
+- Modify: `scripts/verify_release_artifacts.py`
+- Modify: `tests/test_release_artifacts.py`
+
+**Interfaces:**
+- Consumes: public repository URLs, `README.md`, and the verified artifact contract from Task 2.
+- Produces: a PyPI long description, public project links, and an exact build-backend pin that are verified in both wheel and sdist artifacts.
+
+- [ ] **Step 1: Write failing metadata tests**
+
+Require exactly one Markdown long-description content type, a non-empty README payload beginning with `# TrueHeart Core`, and the exact `Homepage`, `Source`, `Issues`, and `Security` project URLs. Require the sdist `pyproject.toml` to use only `setuptools==84.0.0` as its build requirement and `setuptools.build_meta` as its backend. Add negative cases for missing, duplicate, or unexpected values.
+
+- [ ] **Step 2: Run tests and observe RED**
+
+Run the focused artifact-verifier tests; expected failures are the missing public metadata contract and mutable build requirement.
+
+- [ ] **Step 3: Add the metadata and verifier checks**
+
+Set the project README to `README.md` with Markdown content type. Add exact project URLs: Homepage and Source at `https://github.com/qingyou0420/trueheart-core`, Issues at `https://github.com/qingyou0420/trueheart-core/issues`, and Security at `https://github.com/qingyou0420/trueheart-core/security/policy`. Pin the build backend requirement to `setuptools==84.0.0`. Parse the sdist `pyproject.toml` with `tomllib` without extracting it, and fail closed on every mismatch.
+
+- [ ] **Step 4: Verify real artifacts and commit**
+
+Run the focused and full suites, Ruff, format, mypy, build, artifact verifier, clean-wheel install, `pip check`, the example, and public HTTP checks for all four URLs. Commit exactly `build: complete v0.1 package metadata`.
+
 ### Task 3: Publish and verify v0.1.0
 
 **Files:**
