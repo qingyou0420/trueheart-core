@@ -1,9 +1,15 @@
-from datetime import UTC, datetime, timedelta
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
 from trueheart_core import (
+    AuditRecord,
+    EntityType,
+    MemoryRecord,
+    MemoryStatus,
     RawEventDraft,
+    RawEventReceipt,
     RetentionPolicy,
     Scope,
     SourceRef,
@@ -119,3 +125,116 @@ def test_retention_rejects_recall_before_clear() -> None:
             clear_for=timedelta(days=2),
             recall_for=timedelta(days=1),
         )
+
+
+@pytest.mark.parametrize("field", ["content", "metadata"])
+def test_unencodable_text_raises_body_free_validation_error(field: str) -> None:
+    kwargs: dict[str, object] = {
+        "event_id": "evt-1",
+        "scope": Scope("tenant", "owner", "subject"),
+        "source": SourceRef(
+            source_id="source",
+            source_type="test",
+            occurred_at=datetime.now(UTC),
+            trust=TrustLevel.UNTRUSTED,
+        ),
+        "content": "synthetic message",
+        "retention": RetentionPolicy(
+            raw_ttl=timedelta(days=1),
+            clear_for=timedelta(days=1),
+            recall_for=timedelta(days=2),
+        ),
+        "metadata": {},
+    }
+    malformed = "\ud800"
+    if field == "content":
+        kwargs["content"] = malformed
+    else:
+        kwargs["metadata"] = {"bad": malformed}
+
+    with pytest.raises(ValidationError, match=field) as error:
+        RawEventDraft(**kwargs)  # type: ignore[arg-type]
+
+    assert malformed not in str(error.value)
+
+
+def test_raw_event_receipt_validates_and_normalizes_public_fields() -> None:
+    metadata = {"tags": ["synthetic"]}
+    receipt = RawEventReceipt(
+        event_id="evt-1",
+        scope=Scope("tenant", "owner", "subject"),
+        source=SourceRef(
+            source_id="source",
+            source_type="test",
+            occurred_at=datetime(2026, 8, 13, 9, tzinfo=UTC),
+            trust=TrustLevel.OBSERVED,
+        ),
+        content_hash="hash",
+        ingested_at=datetime(2026, 8, 13, 17, tzinfo=UTC),
+        raw_expires_at=datetime(2026, 8, 14, 17, tzinfo=UTC),
+        clear_for=timedelta(days=1),
+        recall_for=timedelta(days=2),
+        content_available=True,
+        metadata=metadata,
+    )
+    metadata["tags"].append("mutated")
+
+    assert receipt.ingested_at.tzinfo is UTC
+    assert receipt.raw_expires_at.tzinfo is UTC
+    assert tuple(receipt.metadata["tags"]) == ("synthetic",)
+    with pytest.raises(ValidationError, match="ingested_at"):
+        replace(
+            receipt,
+            ingested_at=datetime(2026, 8, 13, 17, tzinfo=UTC).replace(tzinfo=None),
+        )
+
+
+def test_memory_record_rejects_invalid_content_and_normalizes_datetimes() -> None:
+    record = MemoryRecord(
+        memory_id="mem-1",
+        scope=Scope("tenant", "owner", "subject"),
+        content="synthetic memory",
+        source_event_ids=("evt-1",),
+        dependency_fingerprint="fingerprint",
+        kind="fact",
+        trust=TrustLevel.OBSERVED,
+        created_at=datetime(2026, 8, 13, 17, tzinfo=timezone(timedelta(hours=8))),
+        clear_until=datetime(2026, 8, 14, 17, tzinfo=timezone(timedelta(hours=8))),
+        recall_until=datetime(2026, 8, 15, 17, tzinfo=timezone(timedelta(hours=8))),
+        status=MemoryStatus.ACTIVE,
+        metadata={"labels": ["synthetic"]},
+    )
+    assert record.created_at.tzinfo is UTC
+    assert record.clear_until.tzinfo is UTC
+    assert record.recall_until.tzinfo is UTC
+    assert tuple(record.metadata["labels"]) == ("synthetic",)
+    with pytest.raises(ValidationError, match="content"):
+        replace(record, content="")
+
+
+def test_audit_record_rejects_naive_datetime_and_oversized_metadata() -> None:
+    metadata = {"labels": ["synthetic"]}
+    kwargs = {
+        "audit_id": "audit-1",
+        "scope": Scope("tenant", "owner", "subject"),
+        "action": "ingest",
+        "entity_type": EntityType.RAW_EVENT,
+        "entity_id": "evt-1",
+        "occurred_at": datetime(2026, 8, 13, 9, tzinfo=UTC),
+        "reason": "synthetic reason",
+        "metadata": metadata,
+    }
+    audit = AuditRecord(**kwargs)
+    metadata["labels"].append("mutated")
+    assert tuple(audit.metadata["labels"]) == ("synthetic",)
+    with pytest.raises(ValidationError, match="occurred_at"):
+        AuditRecord(
+            **{
+                **kwargs,
+                "occurred_at": datetime(2026, 8, 13, 9, tzinfo=UTC).replace(
+                    tzinfo=None
+                ),
+            }
+        )
+    with pytest.raises(ValidationError, match="metadata"):
+        AuditRecord(**{**kwargs, "metadata": {"payload": "x" * (16 * 1024)}})
