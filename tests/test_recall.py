@@ -423,7 +423,28 @@ def test_recall_uses_one_read_snapshot_and_batch_loads_lineage(
     assert sum(statement.startswith("COMMIT") for statement in statements) == 1
     selects = [statement for statement in statements if statement.startswith("SELECT")]
     assert len(selects) == 2
-    assert sum("FROM MEMORIES" in statement for statement in selects) == 1
+    assert sum("JOIN MEMORIES" in statement for statement in selects) == 1
+    assert sum("FROM MEMORY_SOURCES" in statement for statement in selects) == 1
+
+
+def test_empty_recall_checks_schema_without_right_join(tmp_path: Path) -> None:
+    repository = _TracingSQLiteRepository(tmp_path / "empty-recall.db")
+    repository.statements.clear()
+
+    items = TrueHeart(repository).recall(
+        RecallQuery(scope=SCOPE, as_of=datetime(2026, 8, 13, 9, tzinfo=UTC))
+    )
+
+    assert items == ()
+    statements = [statement.upper() for statement in repository.statements]
+    selects = [statement for statement in statements if statement.startswith("SELECT")]
+    assert len(selects) == 2
+    recall_selects = [
+        statement for statement in selects if "FROM SCHEMA_MIGRATIONS" in statement
+    ]
+    assert len(recall_selects) == 1
+    assert "LEFT JOIN MEMORIES" in recall_selects[0]
+    assert "RIGHT JOIN" not in recall_selects[0]
     assert sum("FROM MEMORY_SOURCES" in statement for statement in selects) == 1
 
 

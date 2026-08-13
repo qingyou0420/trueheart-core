@@ -70,6 +70,7 @@ def _memory(
     source_event_ids: tuple[str, ...] = ("evt-1", "evt-2"),
     kind: str = "fact",
     trust: TrustLevel = TrustLevel.OBSERVED,
+    created_at: datetime = CREATED_AT,
 ) -> MemoryDraft:
     return MemoryDraft(
         memory_id=memory_id,
@@ -78,7 +79,7 @@ def _memory(
         source_event_ids=source_event_ids,
         kind=kind,
         trust=trust,
-        created_at=CREATED_AT,
+        created_at=created_at,
         metadata={"label": "synthetic"},
     )
 
@@ -163,6 +164,47 @@ def test_materialize_cannot_exceed_least_trusted_source(tmp_path: Path) -> None:
 
     accepted = service.materialize_once(_memory(trust=TrustLevel.UNTRUSTED))
     assert accepted.trust is TrustLevel.UNTRUSTED
+
+
+def test_materialize_rejects_unrepresentable_deadlines_without_mutation(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deadline-overflow.db"
+    service = _service(path)
+    service.ingest_event(_event("evt-overflow"))
+    draft = _memory(
+        source_event_ids=("evt-overflow",),
+        created_at=datetime.max.replace(tzinfo=UTC),
+    )
+    tables = (
+        "raw_events",
+        "raw_event_content",
+        "memories",
+        "memory_sources",
+        "tombstones",
+        "audit_log",
+    )
+    with sqlite3.connect(path) as connection:
+        before = {
+            table: connection.execute(
+                f"SELECT * FROM {table} ORDER BY rowid"
+            ).fetchall()
+            for table in tables
+        }
+
+    with pytest.raises(ValidationError, match="created_at") as error:
+        service.materialize_once(draft)
+
+    assert "synthetic derived memory" not in str(error.value)
+    assert error.value.__cause__ is None
+    with sqlite3.connect(path) as connection:
+        after = {
+            table: connection.execute(
+                f"SELECT * FROM {table} ORDER BY rowid"
+            ).fetchall()
+            for table in tables
+        }
+    assert after == before
 
 
 def test_materialize_writes_memory_and_all_edges_atomically(tmp_path: Path) -> None:
@@ -285,6 +327,68 @@ def test_identical_materialization_preserves_sealed_lifecycle_state(
         assert connection.execute(
             "SELECT COUNT(*) FROM audit_log WHERE action = ?", ("materialize",)
         ).fetchone() == (1,)
+
+
+@pytest.mark.parametrize("status", [MemoryStatus.ACTIVE, MemoryStatus.SEALED])
+def test_identical_materialization_rejects_dangling_exact_scope_source_receipt(
+    tmp_path: Path,
+    status: MemoryStatus,
+) -> None:
+    path = tmp_path / f"dangling-replay-{status.value}.db"
+    service = _service(path)
+    other_scope = Scope("tenant", "owner", "other-subject")
+    service.ingest_event(_event("evt-shared"))
+    service.ingest_event(_event("evt-shared", scope=other_scope))
+    draft = _memory(source_event_ids=("evt-shared",))
+    service.materialize_once(draft)
+
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute(
+            "UPDATE memories SET status = ? WHERE tenant_id = ? AND owner_id = ? "
+            "AND subject_id = ? AND memory_id = ?",
+            (status.value, "tenant", "owner", "subject", "mem-1"),
+        )
+        connection.execute(
+            "DELETE FROM raw_event_content WHERE tenant_id = ? AND owner_id = ? "
+            "AND subject_id = ? AND event_id = ?",
+            ("tenant", "owner", "subject", "evt-shared"),
+        )
+        connection.execute(
+            "DELETE FROM raw_events WHERE tenant_id = ? AND owner_id = ? "
+            "AND subject_id = ? AND event_id = ?",
+            ("tenant", "owner", "subject", "evt-shared"),
+        )
+        tables = (
+            "schema_migrations",
+            "raw_events",
+            "raw_event_content",
+            "memories",
+            "memory_sources",
+            "tombstones",
+            "audit_log",
+        )
+        before = {
+            table: connection.execute(
+                f"SELECT * FROM {table} ORDER BY rowid"
+            ).fetchall()
+            for table in tables
+        }
+
+    with pytest.raises(RepositoryCorruption, match="invalid memory record") as error:
+        service.materialize_once(draft)
+
+    assert "synthetic body" not in str(error.value)
+    assert "synthetic derived memory" not in str(error.value)
+    assert error.value.__cause__ is None
+    with sqlite3.connect(path) as connection:
+        after = {
+            table: connection.execute(
+                f"SELECT * FROM {table} ORDER BY rowid"
+            ).fetchall()
+            for table in tables
+        }
+    assert after == before
 
 
 def test_identical_materialization_uses_creation_snapshots_not_current_sources(

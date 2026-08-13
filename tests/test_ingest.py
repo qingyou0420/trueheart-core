@@ -32,6 +32,13 @@ class _ProcessResultQueue(Protocol):
     def put(self, item: tuple[str, str]) -> None: ...
 
 
+class _MissingJsonFunctionRepository(SQLiteRepository):
+    @staticmethod
+    def _verify_json_support(connection: sqlite3.Connection) -> None:
+        del connection
+        raise sqlite3.OperationalError("private-json-function-sentinel")
+
+
 def _initialize_repository_process(
     path: str,
     start_event: _ProcessStartEvent,
@@ -151,6 +158,39 @@ def test_same_event_id_in_another_scope_is_independent(tmp_path: Path) -> None:
         assert connection.execute("SELECT COUNT(*) FROM raw_events").fetchone() == (2,)
 
 
+def test_ingest_rejects_unrepresentable_raw_expiry_before_repository_mutation(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "raw-expiry-overflow.db"
+    service = _service(path)
+    draft = _draft(
+        occurred_at=datetime.max.replace(tzinfo=UTC),
+        raw_ttl=timedelta(microseconds=1),
+    )
+    tables = ("raw_events", "raw_event_content", "audit_log", "tombstones")
+    with sqlite3.connect(path) as connection:
+        before = {
+            table: connection.execute(
+                f"SELECT * FROM {table} ORDER BY rowid"
+            ).fetchall()
+            for table in tables
+        }
+
+    with pytest.raises(ValidationError, match="raw_expires_at") as error:
+        service.ingest_event(draft)
+
+    assert "synthetic message" not in str(error.value)
+    assert error.value.__cause__ is None
+    with sqlite3.connect(path) as connection:
+        after = {
+            table: connection.execute(
+                f"SELECT * FROM {table} ORDER BY rowid"
+            ).fetchall()
+            for table in tables
+        }
+    assert after == before
+
+
 def test_tombstoned_event_id_cannot_be_reused(tmp_path: Path) -> None:
     path = tmp_path / "trueheart.db"
     service = _service(path)
@@ -217,6 +257,16 @@ def test_schema_version_newer_than_supported_fails_closed(tmp_path: Path) -> Non
 def test_memory_database_path_is_rejected() -> None:
     with pytest.raises(ValidationError, match="path"):
         SQLiteRepository(":memory:")
+
+
+def test_constructor_fails_closed_when_sqlite_json_support_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(RepositoryCorruption, match="JSON support unavailable") as error:
+        _MissingJsonFunctionRepository(tmp_path / "missing-json.db")
+
+    assert "private-json-function-sentinel" not in str(error.value)
+    assert error.value.__cause__ is None
 
 
 def test_failed_schema_initialization_rolls_back_all_trueheart_tables(

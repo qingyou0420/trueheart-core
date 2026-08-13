@@ -439,6 +439,24 @@ def test_audit_rejects_corrupt_rows_without_disclosure(
     assert error.value.__cause__ is None
 
 
+def test_audit_rejects_offset_overflow_timestamp_without_disclosure(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "audit-offset-overflow.db"
+    service = _service(path)
+    service.ingest_event(_event("evt-offset-overflow"))
+    stored_value = "9999-12-31T23:59:59.999999-23:59"
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE audit_log SET occurred_at = ?", (stored_value,))
+
+    with pytest.raises(RepositoryCorruption) as error:
+        service.audit(SCOPE)
+
+    assert stored_value not in str(error.value)
+    assert BODY_SENTINEL not in str(error.value)
+    assert error.value.__cause__ is None
+
+
 @pytest.mark.parametrize(
     ("action", "entity_type"),
     [

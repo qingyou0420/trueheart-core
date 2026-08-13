@@ -46,7 +46,12 @@ class TrueHeart:
     def ingest_event(self, draft: RawEventDraft) -> RawEventReceipt:
         ingested_at = _normalize_datetime(self._clock(), "clock")
         content_hash = sha256(draft.content.encode("utf-8")).hexdigest()
-        raw_expires_at = draft.source.occurred_at + draft.retention.raw_ttl
+        try:
+            raw_expires_at = draft.source.occurred_at + draft.retention.raw_ttl
+        except OverflowError:
+            raise ValidationError(
+                "raw_expires_at", "must be a representable datetime"
+            ) from None
         return self._repository.ingest_event(
             draft,
             content_hash=content_hash,

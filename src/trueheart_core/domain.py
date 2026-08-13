@@ -20,6 +20,8 @@ JsonValue: TypeAlias = (
 _MAX_COMPONENT_LENGTH = 128
 _MAX_CONTENT_BYTES = 256 * 1024
 _MAX_METADATA_BYTES = 16 * 1024
+_MAX_METADATA_DEPTH = 64
+_MAX_METADATA_INTEGER_BITS = 4096
 
 
 class TrustLevel(IntEnum):
@@ -55,30 +57,45 @@ def _validate_text(
 
 
 def _normalize_datetime(value: datetime, field_name: str) -> datetime:
-    if (
-        not isinstance(value, datetime)
-        or value.tzinfo is None
-        or value.utcoffset() is None
-    ):
+    if not isinstance(value, datetime) or value.tzinfo is None:
         raise ValidationError(field_name, "must be timezone-aware")
-    return value.astimezone(UTC)
+    try:
+        offset = value.utcoffset()
+        normalized = value.astimezone(UTC)
+    except (OSError, OverflowError, TypeError, ValueError):
+        raise ValidationError(field_name, "must be a representable datetime") from None
+    if offset is None:
+        raise ValidationError(field_name, "must be timezone-aware")
+    return normalized
 
 
-def _freeze_json(value: object, field_name: str) -> object:
-    if value is None or isinstance(value, (str, bool, int)):
+def _freeze_json(value: object, field_name: str, *, depth: int = 0) -> object:
+    if value is None or isinstance(value, (str, bool)):
+        return value
+    if isinstance(value, int):
+        if value.bit_length() > _MAX_METADATA_INTEGER_BITS:
+            raise ValidationError(field_name, "must contain bounded integers")
         return value
     if isinstance(value, float):
         if not math.isfinite(value):
             raise ValidationError(field_name, "must contain finite JSON values")
         return value
     if isinstance(value, list):
-        return tuple(_freeze_json(item, field_name) for item in value)
+        container_depth = depth + 1
+        if container_depth > _MAX_METADATA_DEPTH:
+            raise ValidationError(field_name, "must be at most 64 levels deep")
+        return tuple(
+            _freeze_json(item, field_name, depth=container_depth) for item in value
+        )
     if isinstance(value, Mapping):
+        container_depth = depth + 1
+        if container_depth > _MAX_METADATA_DEPTH:
+            raise ValidationError(field_name, "must be at most 64 levels deep")
         frozen: dict[str, object] = {}
         for key, item in value.items():
             if not isinstance(key, str):
                 raise ValidationError(field_name, "must have string keys")
-            frozen[key] = _freeze_json(item, field_name)
+            frozen[key] = _freeze_json(item, field_name, depth=container_depth)
         return MappingProxyType(frozen)
     raise ValidationError(field_name, "must contain only JSON values")
 
@@ -104,11 +121,16 @@ def _canonical_json(value: object) -> str:
 def _freeze_metadata(value: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
     if not isinstance(value, Mapping):
         raise ValidationError("metadata", "must be a JSON object")
-    frozen = _freeze_json(value, "metadata")
-    if not isinstance(frozen, Mapping):
-        raise ValidationError("metadata", "must be a JSON object")
-    if _utf8_length(_canonical_json(frozen), "metadata") > _MAX_METADATA_BYTES:
-        raise ValidationError("metadata", "must serialize to at most 16 KiB")
+    try:
+        frozen = _freeze_json(value, "metadata")
+        if not isinstance(frozen, Mapping):
+            raise ValidationError("metadata", "must be a JSON object")
+        if _utf8_length(_canonical_json(frozen), "metadata") > _MAX_METADATA_BYTES:
+            raise ValidationError("metadata", "must serialize to at most 16 KiB")
+    except ValidationError:
+        raise
+    except (OverflowError, RecursionError, ValueError):
+        raise ValidationError("metadata", "must contain bounded JSON values") from None
     return cast(Mapping[str, JsonValue], frozen)
 
 

@@ -30,7 +30,11 @@ administrator or compromised host.
 
 Exact `Scope` is caller-supplied database isolation, not authentication or
 authorization. The package is not a multi-tenant service or API auth layer.
-The host must decide which principal may construct and use a scope.
+The host must decide which principal may construct and use a scope. If an ID is
+absent from the requested exact scope but exists elsewhere in the same database,
+materialization and governance can disclose that one-bit existence by raising
+`ScopeMismatch` rather than `EntityNotFound`. Hosts must treat identifiers as
+sensitive and authorize both scope and ID use.
 
 Because the core treats bodies and metadata as data, it does not establish
 their truth and cannot prevent prompt injection. It cannot control host prompt
@@ -48,3 +52,8 @@ need storage encryption, avoid placing secrets in IDs or metadata, authorize
 scope construction, call expiry on an explicit schedule, and assess any body
 before including it in a model prompt. Maintainers own dependency and workflow
 review; contributors must use synthetic fixtures and declare provenance.
+
+Metadata validation permits at most 64 JSON container levels and integers of at
+most 4096 bits, in addition to the 16 KiB canonical serialization limit. The
+SQLite adapter checks for the required `json_valid` function at connection open
+and fails closed if it is unavailable.

@@ -109,9 +109,18 @@ how a host constructs prompts or sends content to a provider.
 
 `Scope` is caller-supplied database isolation, not authentication or
 authorization. TrueHeart Core is not a multi-tenant service or API auth layer.
-It does not protect against a malicious local administrator or compromised
+When a requested ID is absent from the exact scope but exists elsewhere in the
+same database, materialization and governance can distinguish that one-bit
+existence through `ScopeMismatch` rather than `EntityNotFound`. IDs are
+sensitive; hosts must authenticate and authorize both scope and ID use. The
+core does not protect against a malicious local administrator or compromised
 host. Body-free audit and tombstone records omit event and memory bodies, but
 their identifiers and metadata can still be sensitive.
+
+Metadata is limited to 64 JSON container levels, integer magnitude of at most
+4096 bits, and 16 KiB after canonical serialization. The SQLite adapter checks
+for the standard `json_valid` function when it opens a connection and fails
+closed if that required capability is unavailable.
 
 Read [security guarantees](docs/security-guarantees.md), the
 [threat model](docs/threat-model.md), and [security reporting](SECURITY.md)

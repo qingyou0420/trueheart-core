@@ -517,6 +517,43 @@ def test_lifecycle_diagnosis_rejects_malformed_tombstones(
     assert error.value.__cause__ is None
 
 
+def test_lifecycle_diagnosis_contains_tombstone_offset_overflow(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "tombstone-offset-overflow.db"
+    service = _service(path)
+    stored_value = "9999-12-31T23:59:59.999999-23:59"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO tombstones (tenant_id, owner_id, subject_id, entity_type, "
+            "entity_id, deleted_at, reason, dependency_fingerprint, metadata_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                SCOPE.tenant_id,
+                SCOPE.owner_id,
+                SCOPE.subject_id,
+                "raw_event",
+                "deleted-offset",
+                stored_value,
+                "governance requested",
+                None,
+                "{}",
+            ),
+        )
+
+    with pytest.raises(RepositoryCorruption) as error:
+        service.govern(
+            _command(
+                GovernanceAction.DELETE,
+                EntityType.RAW_EVENT,
+                "deleted-offset",
+            )
+        )
+
+    assert stored_value not in str(error.value)
+    assert error.value.__cause__ is None
+
+
 def test_scope_mismatch_diagnosis_validates_other_scope_tombstone(
     tmp_path: Path,
 ) -> None:

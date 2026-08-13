@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 
 import pytest
 
@@ -16,6 +16,18 @@ from trueheart_core import (
     TrustLevel,
     ValidationError,
 )
+
+TZINFO_SENTINEL = "PRIVATE-TZINFO-SENTINEL-42"
+
+
+class _TypeErrorTimezone(tzinfo):
+    def utcoffset(self, dt: datetime | None) -> timedelta | None:
+        del dt
+        raise TypeError(TZINFO_SENTINEL)
+
+    def dst(self, dt: datetime | None) -> timedelta | None:
+        del dt
+        return None
 
 
 def test_scope_rejects_blank_or_oversized_components() -> None:
@@ -72,6 +84,36 @@ def test_datetime_rejects_naive_values() -> None:
         )
 
 
+def test_datetime_normalization_contains_offset_boundary_overflow() -> None:
+    boundary = datetime.max.replace(tzinfo=timezone(-timedelta(hours=23, minutes=59)))
+
+    with pytest.raises(ValidationError, match="occurred_at") as error:
+        SourceRef(
+            source_id="source",
+            source_type="test",
+            occurred_at=boundary,
+            trust=TrustLevel.UNTRUSTED,
+        )
+
+    assert str(boundary) not in str(error.value)
+    assert error.value.__cause__ is None
+
+
+def test_datetime_normalization_contains_custom_tzinfo_type_error() -> None:
+    hostile_datetime = datetime(2026, 8, 13, 9, tzinfo=_TypeErrorTimezone())
+
+    with pytest.raises(ValidationError, match="occurred_at") as error:
+        SourceRef(
+            source_id="source",
+            source_type="test",
+            occurred_at=hostile_datetime,
+            trust=TrustLevel.UNTRUSTED,
+        )
+
+    assert TZINFO_SENTINEL not in str(error.value)
+    assert error.value.__cause__ is None
+
+
 @pytest.mark.parametrize(
     "content",
     ["", "x" * (256 * 1024 + 1)],
@@ -106,6 +148,81 @@ def test_metadata_rejects_serialized_value_over_16_kib() -> None:
             trust=TrustLevel.UNTRUSTED,
             metadata={"payload": "x" * (16 * 1024)},
         )
+
+
+def _nested_metadata(depth: int) -> dict[str, object]:
+    value: object = "synthetic leaf"
+    for _ in range(depth - 1):
+        value = {"nested": value}
+    return {"root": value}
+
+
+def test_metadata_accepts_depth_64_and_rejects_depth_65_without_leakage() -> None:
+    accepted = SourceRef(
+        source_id="source",
+        source_type="test",
+        occurred_at=datetime.now(UTC),
+        trust=TrustLevel.UNTRUSTED,
+        metadata=_nested_metadata(64),  # type: ignore[arg-type]
+    )
+
+    assert accepted.metadata
+    with pytest.raises(ValidationError, match="metadata") as error:
+        SourceRef(
+            source_id="source",
+            source_type="test",
+            occurred_at=datetime.now(UTC),
+            trust=TrustLevel.UNTRUSTED,
+            metadata=_nested_metadata(65),  # type: ignore[arg-type]
+        )
+
+    assert "synthetic leaf" not in str(error.value)
+    assert error.value.__cause__ is None
+
+
+def test_metadata_accepts_4096_bit_integer_and_rejects_4097_bits() -> None:
+    accepted_value = 1 << 4095
+    accepted = SourceRef(
+        source_id="source",
+        source_type="test",
+        occurred_at=datetime.now(UTC),
+        trust=TrustLevel.UNTRUSTED,
+        metadata={"number": accepted_value},
+    )
+
+    assert accepted.metadata["number"] == accepted_value
+    rejected_value = 1 << 4096
+    with pytest.raises(ValidationError, match="metadata") as error:
+        SourceRef(
+            source_id="source",
+            source_type="test",
+            occurred_at=datetime.now(UTC),
+            trust=TrustLevel.UNTRUSTED,
+            metadata={"number": rejected_value},
+        )
+
+    assert str(rejected_value) not in str(error.value)
+    assert error.value.__cause__ is None
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [{"number": 10**5000}, _nested_metadata(1100)],
+    ids=["huge-integer", "extreme-depth"],
+)
+def test_adversarial_metadata_failures_are_contained(
+    metadata: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError, match="metadata") as error:
+        SourceRef(
+            source_id="source",
+            source_type="test",
+            occurred_at=datetime.now(UTC),
+            trust=TrustLevel.UNTRUSTED,
+            metadata=metadata,  # type: ignore[arg-type]
+        )
+
+    assert error.value.__cause__ is None
 
 
 @pytest.mark.parametrize("duration", [timedelta(0), timedelta(days=-1)])

@@ -238,11 +238,21 @@ class SQLiteRepository:
             connection.execute("PRAGMA busy_timeout = 25")
             connection.execute("PRAGMA foreign_keys = ON")
             self._enable_wal(connection)
+            try:
+                self._verify_json_support(connection)
+            except sqlite3.Error:
+                raise RepositoryCorruption("SQLite JSON support unavailable") from None
             connection.execute("PRAGMA busy_timeout = 5000")
             return connection
         except (RepositoryCorruption, sqlite3.Error):
             connection.close()
             raise
+
+    @staticmethod
+    def _verify_json_support(connection: sqlite3.Connection) -> None:
+        row = connection.execute("SELECT json_valid(?)", ("{}",)).fetchone()
+        if row is None or type(row[0]) is not int or row[0] != 1:
+            raise RepositoryCorruption("SQLite JSON support unavailable")
 
     @staticmethod
     def _enable_wal(connection: sqlite3.Connection) -> None:
@@ -586,11 +596,19 @@ class SQLiteRepository:
             ).fetchone()
             if existing is not None:
                 source_rows = connection.execute(
-                    "SELECT event_id, event_id AS receipt_event_id, "
-                    "source_trust_snapshot, clear_for_microseconds_snapshot, "
-                    "recall_for_microseconds_snapshot FROM memory_sources "
-                    "WHERE tenant_id = ? AND owner_id = ? AND subject_id = ? "
-                    "AND memory_id = ? ORDER BY event_id",
+                    "SELECT edges.event_id, "
+                    "receipts.event_id AS receipt_event_id, "
+                    "edges.source_trust_snapshot, "
+                    "edges.clear_for_microseconds_snapshot, "
+                    "edges.recall_for_microseconds_snapshot "
+                    "FROM memory_sources AS edges LEFT JOIN raw_events AS receipts "
+                    "ON receipts.tenant_id = edges.tenant_id "
+                    "AND receipts.owner_id = edges.owner_id "
+                    "AND receipts.subject_id = edges.subject_id "
+                    "AND receipts.event_id = edges.event_id "
+                    "WHERE edges.tenant_id = ? AND edges.owner_id = ? "
+                    "AND edges.subject_id = ? AND edges.memory_id = ? "
+                    "ORDER BY edges.event_id",
                     (*scope, draft.memory_id),
                 ).fetchall()
                 record = self._memory_record(existing, source_rows)
@@ -641,8 +659,13 @@ class SQLiteRepository:
                 raise TrustEscalation(draft.memory_id)
             shortest_clear_for = min(receipt.clear_for for receipt in source_receipts)
             shortest_recall_for = min(receipt.recall_for for receipt in source_receipts)
-            clear_until = draft.created_at + shortest_clear_for
-            recall_until = draft.created_at + shortest_recall_for
+            try:
+                clear_until = draft.created_at + shortest_clear_for
+                recall_until = draft.created_at + shortest_recall_for
+            except OverflowError:
+                raise ValidationError(
+                    "created_at", "retention deadline must be representable"
+                ) from None
 
             connection.execute(
                 "INSERT INTO memories (tenant_id, owner_id, subject_id, memory_id, "
@@ -863,9 +886,10 @@ class SQLiteRepository:
             scope_values = _scope_values(scope)
             rows = connection.execute(
                 "SELECT memories.*, schema_state.schema_version, "
-                "schema_state.schema_version_count FROM memories RIGHT JOIN "
+                "schema_state.schema_version_count FROM "
                 "(SELECT MAX(version) AS schema_version, COUNT(*) AS "
                 "schema_version_count FROM schema_migrations) AS schema_state "
+                "LEFT JOIN memories "
                 "ON memories.tenant_id = ? AND memories.owner_id = ? "
                 "AND memories.subject_id = ?",
                 scope_values,
@@ -1617,13 +1641,16 @@ class SQLiteRepository:
     @staticmethod
     def _stored_datetime(row: sqlite3.Row, key: str) -> datetime:
         text = SQLiteRepository._stored_text(row, key)
-        value = datetime.fromisoformat(text)
-        if value.tzinfo is None or value.utcoffset() is None:
-            raise ValueError
-        normalized = value.astimezone(UTC)
-        if _datetime_text(normalized) != text:
-            raise ValueError
-        return normalized
+        try:
+            value = datetime.fromisoformat(text)
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError
+            normalized = value.astimezone(UTC)
+            if _datetime_text(normalized) != text:
+                raise ValueError
+            return normalized
+        except (OSError, OverflowError, ValueError):
+            raise ValueError from None
 
     @staticmethod
     def _stored_metadata(row: sqlite3.Row, key: str) -> dict[str, JsonValue]:
