@@ -21,11 +21,22 @@ jobs:
             echo "Refusing unexpected release tag: $RELEASE_TAG" >&2
             exit 1
           fi
-      - name: Check out released tag
+      - name: Check out release event commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ github.sha }}
+          fetch-depth: "0"
           persist-credentials: false
+      - name: Verify release tag points to event commit
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: |
+          head_commit="$(git rev-parse 'HEAD^{commit}')"
+          tag_commit="$(git rev-parse 'refs/tags/v0.1.0^{commit}')"
+          if [ "$head_commit" != "$EXPECTED_COMMIT" ] || [ "$tag_commit" != "$EXPECTED_COMMIT" ]; then
+            echo "Release tag and event commit do not match" >&2
+            exit 1
+          fi
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -67,6 +78,8 @@ jobs:
         with:
           name: release-artifacts
       - name: Upload assets to existing release
+        # Partial-publication recovery is fail-loud: verify the existing asset hashes before rerunning only failed jobs.
+        # Never add --clobber without separately reviewing the published hashes.
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
@@ -90,6 +103,8 @@ jobs:
         with:
           name: release-artifacts
       - name: Publish distributions with Trusted Publishing
+        # PyPI files are immutable; verify published hashes before rerunning only a failed publication job.
+        # Never enable skip-existing for the production release.
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: dist

@@ -4,6 +4,7 @@ import base64
 import csv
 import hashlib
 import io
+import stat
 import subprocess
 import sys
 import tarfile
@@ -29,17 +30,23 @@ def _metadata(
     version: str = "0.1.0",
     license_expression: str | None = "MIT",
     requires_python: str = ">=3.11",
-    requires_dist: tuple[str, ...] = (),
+    requires_dist: tuple[str, ...] = EXPECTED_DEV_REQUIREMENTS,
+    provides_extra: tuple[str, ...] = ("dev",),
+    extra_headers: tuple[str, ...] = (),
+    omit_fields: tuple[str, ...] = (),
 ) -> bytes:
-    lines = [
-        "Metadata-Version: 2.4",
-        "Name: trueheart-core",
-        f"Version: {version}",
-        f"Requires-Python: {requires_python}",
-    ]
-    if license_expression is not None:
+    lines = ["Metadata-Version: 2.4"]
+    if "Name" not in omit_fields:
+        lines.append("Name: trueheart-core")
+    if "Version" not in omit_fields:
+        lines.append(f"Version: {version}")
+    if "Requires-Python" not in omit_fields:
+        lines.append(f"Requires-Python: {requires_python}")
+    if license_expression is not None and "License-Expression" not in omit_fields:
         lines.append(f"License-Expression: {license_expression}")
+    lines.extend(f"Provides-Extra: {extra}" for extra in provides_extra)
     lines.extend(f"Requires-Dist: {requirement}" for requirement in requires_dist)
+    lines.extend(extra_headers)
     return ("\n".join(lines) + "\n\n").encode()
 
 
@@ -53,6 +60,8 @@ def _write_wheel(
     metadata: bytes,
     *,
     valid_record: bool = True,
+    extra_member: str | None = None,
+    extra_member_mode: int | None = None,
 ) -> None:
     dist_info = "trueheart_core-0.1.0.dist-info"
     files = {
@@ -65,6 +74,8 @@ def _write_wheel(
             b"Tag: py3-none-any\n"
         ),
     }
+    if extra_member is not None:
+        files[extra_member] = b"unsafe\n"
     record_buffer = io.StringIO(newline="")
     writer = csv.writer(record_buffer, lineterminator="\n")
     for name, content in files.items():
@@ -77,7 +88,13 @@ def _write_wheel(
 
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for name, content in files.items():
-            archive.writestr(name, content)
+            if name == extra_member and extra_member_mode is not None:
+                member = zipfile.ZipInfo(name)
+                member.create_system = 3
+                member.external_attr = extra_member_mode << 16
+                archive.writestr(member, content)
+            else:
+                archive.writestr(name, content)
 
 
 def _add_tar_bytes(archive: tarfile.TarFile, name: str, content: bytes) -> None:
@@ -91,14 +108,20 @@ def _write_sdist(
     path: Path,
     metadata: bytes,
     *,
-    unsafe_member: str | None = None,
+    extra_members: tuple[str, ...] = (),
+    link_member: str | None = None,
 ) -> None:
     with tarfile.open(path, "w:gz") as archive:
         root = "trueheart_core-0.1.0"
         _add_tar_bytes(archive, f"{root}/PKG-INFO", metadata)
         _add_tar_bytes(archive, f"{root}/pyproject.toml", b"[build-system]\n")
-        if unsafe_member is not None:
-            _add_tar_bytes(archive, unsafe_member, b"unsafe\n")
+        for member_name in extra_members:
+            _add_tar_bytes(archive, member_name, b"unsafe\n")
+        if link_member is not None:
+            member = tarfile.TarInfo(link_member)
+            member.type = tarfile.SYMTYPE
+            member.linkname = f"{root}/pyproject.toml"
+            archive.addfile(member)
 
 
 def _create_artifacts(
@@ -107,8 +130,14 @@ def _create_artifacts(
     version: str = "0.1.0",
     license_expression: str | None = "MIT",
     requires_python: str = ">=3.11",
-    requires_dist: tuple[str, ...] = (),
-    unsafe_member: str | None = None,
+    requires_dist: tuple[str, ...] = EXPECTED_DEV_REQUIREMENTS,
+    provides_extra: tuple[str, ...] = ("dev",),
+    extra_headers: tuple[str, ...] = (),
+    omit_fields: tuple[str, ...] = (),
+    wheel_member: str | None = None,
+    wheel_member_mode: int | None = None,
+    sdist_members: tuple[str, ...] = (),
+    sdist_link: str | None = None,
     valid_record: bool = True,
 ) -> Path:
     dist = directory / "dist"
@@ -118,11 +147,25 @@ def _create_artifacts(
         license_expression=license_expression,
         requires_python=requires_python,
         requires_dist=requires_dist,
+        provides_extra=provides_extra,
+        extra_headers=extra_headers,
+        omit_fields=omit_fields,
     )
     wheel_name = WHEEL_NAME.replace("0.1.0", version)
     sdist_name = SDIST_NAME.replace("0.1.0", version)
-    _write_wheel(dist / wheel_name, metadata, valid_record=valid_record)
-    _write_sdist(dist / sdist_name, metadata, unsafe_member=unsafe_member)
+    _write_wheel(
+        dist / wheel_name,
+        metadata,
+        valid_record=valid_record,
+        extra_member=wheel_member,
+        extra_member_mode=wheel_member_mode,
+    )
+    _write_sdist(
+        dist / sdist_name,
+        metadata,
+        extra_members=sdist_members,
+        link_member=sdist_link,
+    )
     return dist
 
 
@@ -180,19 +223,144 @@ def test_verifier_rejects_an_extra_distribution(tmp_path: Path) -> None:
 def test_verifier_rejects_unsafe_sdist_member_paths(
     tmp_path: Path, member_name: str
 ) -> None:
-    _create_artifacts(tmp_path, unsafe_member=member_name)
+    _create_artifacts(tmp_path, sdist_members=(member_name,))
 
     result = _run_verifier(tmp_path)
 
     _assert_rejected(result, f"unsafe sdist member: {member_name}")
 
 
-def test_verifier_rejects_metadata_without_the_mit_license(tmp_path: Path) -> None:
-    _create_artifacts(tmp_path, license_expression=None)
+@pytest.mark.parametrize(
+    "member_name",
+    [
+        "../escaped.py",
+        "/absolute.py",
+        "trueheart_core/./alias.py",
+        "trueheart_core\\..\\escaped.py",
+        "C:/escaped.py",
+        "//server/share/escaped.py",
+    ],
+)
+def test_verifier_rejects_noncanonical_wheel_member_paths(
+    tmp_path: Path, member_name: str
+) -> None:
+    _create_artifacts(tmp_path, wheel_member=member_name)
 
     result = _run_verifier(tmp_path)
 
-    _assert_rejected(result, "License-Expression must be MIT")
+    _assert_rejected(result, "unsafe wheel member:")
+
+
+def test_verifier_rejects_a_non_regular_wheel_member(tmp_path: Path) -> None:
+    member_name = "trueheart_core/link.py"
+    _create_artifacts(
+        tmp_path,
+        wheel_member=member_name,
+        wheel_member_mode=stat.S_IFLNK | 0o777,
+    )
+
+    result = _run_verifier(tmp_path)
+
+    _assert_rejected(result, f"unsafe wheel member: {member_name}")
+
+
+@pytest.mark.parametrize(
+    "member_name",
+    [
+        "trueheart_core-0.1.0/./alias.txt",
+        "trueheart_core-0.1.0\\..\\escaped.txt",
+        "C:/escaped.txt",
+        "//server/share/escaped.txt",
+    ],
+)
+def test_verifier_rejects_noncanonical_sdist_member_paths(
+    tmp_path: Path, member_name: str
+) -> None:
+    _create_artifacts(tmp_path, sdist_members=(member_name,))
+
+    result = _run_verifier(tmp_path)
+
+    _assert_rejected(result, f"unsafe sdist member: {member_name}")
+
+
+def test_verifier_rejects_sdist_members_with_the_same_normalized_path(
+    tmp_path: Path,
+) -> None:
+    root = "trueheart_core-0.1.0"
+    _create_artifacts(
+        tmp_path,
+        sdist_members=(f"{root}/./pyproject.toml",),
+    )
+
+    result = _run_verifier(tmp_path)
+
+    _assert_rejected(result, f"unsafe sdist member: {root}/./pyproject.toml")
+
+
+def test_verifier_rejects_a_non_regular_sdist_member(tmp_path: Path) -> None:
+    member_name = "trueheart_core-0.1.0/link.py"
+    _create_artifacts(tmp_path, sdist_link=member_name)
+
+    result = _run_verifier(tmp_path)
+
+    _assert_rejected(result, f"unsafe sdist member: {member_name}")
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["Name", "Version", "Requires-Python", "License-Expression"],
+)
+def test_verifier_rejects_missing_singleton_metadata_fields(
+    tmp_path: Path, field: str
+) -> None:
+    _create_artifacts(tmp_path, omit_fields=(field,))
+
+    result = _run_verifier(tmp_path)
+
+    _assert_rejected(result, f"{field} must appear exactly once")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("Name", "trueheart-core"),
+        ("Version", "0.1.0"),
+        ("Requires-Python", ">=3.11"),
+        ("License-Expression", "MIT"),
+    ],
+)
+def test_verifier_rejects_duplicate_singleton_metadata_fields(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    _create_artifacts(tmp_path, extra_headers=(f"{field}: {value}",))
+
+    result = _run_verifier(tmp_path)
+
+    _assert_rejected(result, f"{field} must appear exactly once")
+
+
+def test_verifier_rejects_missing_dev_extra_metadata(tmp_path: Path) -> None:
+    _create_artifacts(tmp_path, provides_extra=())
+
+    result = _run_verifier(tmp_path)
+
+    _assert_rejected(result, "Provides-Extra must be exactly dev")
+
+
+def test_verifier_rejects_an_unknown_extra_metadata_value(tmp_path: Path) -> None:
+    _create_artifacts(tmp_path, provides_extra=("dev", "docs"))
+
+    result = _run_verifier(tmp_path)
+
+    _assert_rejected(result, "Provides-Extra must be exactly dev")
+
+
+def test_verifier_rejects_duplicate_dev_extra_metadata(tmp_path: Path) -> None:
+    _create_artifacts(tmp_path, provides_extra=("dev", "dev"))
+
+    result = _run_verifier(tmp_path)
+
+    _assert_rejected(result, "Provides-Extra must be exactly dev")
 
 
 def test_verifier_rejects_a_runtime_dependency(tmp_path: Path) -> None:
@@ -239,6 +407,25 @@ def test_verifier_accepts_only_the_exact_dev_dependency_set(tmp_path: Path) -> N
     assert result.returncode == 0, result.stderr
 
 
+def test_verifier_rejects_a_subset_of_the_dev_dependency_set(tmp_path: Path) -> None:
+    _create_artifacts(tmp_path, requires_dist=EXPECTED_DEV_REQUIREMENTS[:-1])
+
+    result = _run_verifier(tmp_path)
+
+    _assert_rejected(result, "Requires-Dist must match the exact dev dependency set")
+
+
+def test_verifier_rejects_a_duplicate_dev_dependency(tmp_path: Path) -> None:
+    _create_artifacts(
+        tmp_path,
+        requires_dist=EXPECTED_DEV_REQUIREMENTS + (EXPECTED_DEV_REQUIREMENTS[0],),
+    )
+
+    result = _run_verifier(tmp_path)
+
+    _assert_rejected(result, "Requires-Dist must match the exact dev dependency set")
+
+
 def test_verifier_rejects_the_wrong_python_requirement(tmp_path: Path) -> None:
     _create_artifacts(tmp_path, requires_python=">=3.10")
 
@@ -268,3 +455,33 @@ def test_verifier_accepts_safe_artifacts_and_writes_deterministic_checksums(
         for path in sorted(dist.iterdir(), key=lambda item: item.name)
     )
     assert (tmp_path / "SHA256SUMS").read_text(encoding="ascii") == expected
+
+
+def test_release_workflow_binds_the_tag_to_the_release_event_commit() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "ref: ${{ github.sha }}" in workflow
+    assert 'fetch-depth: "0"' in workflow
+    assert "EXPECTED_COMMIT: ${{ github.sha }}" in workflow
+    assert "refs/tags/v0.1.0^{commit}" in workflow
+    assert workflow.index("Check out release event commit") < workflow.index(
+        "Verify release tag points to event commit"
+    )
+    assert "ref: ${{ github.event.release.tag_name }}" not in workflow
+
+
+def test_release_workflow_keeps_partial_publication_recovery_fail_loud() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+        encoding="utf-8"
+    )
+
+    lines = [line.strip() for line in workflow.splitlines()]
+    assert not any(line.startswith("skip-existing:") for line in lines)
+    assert not any(
+        line == "--clobber" or line.startswith("--clobber ") for line in lines
+    )
+    assert (
+        "verify the existing asset hashes before rerunning only failed jobs" in workflow
+    )

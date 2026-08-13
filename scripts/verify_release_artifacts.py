@@ -5,24 +5,26 @@ from __future__ import annotations
 import base64
 import csv
 import hashlib
+import stat
 import sys
 import tarfile
 import zipfile
+from collections import Counter
 from email.message import Message
 from email.parser import BytesParser
 from email.policy import default
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 WHEEL_NAME = "trueheart_core-0.1.0-py3-none-any.whl"
 SDIST_NAME = "trueheart_core-0.1.0.tar.gz"
 EXPECTED_FILES = {WHEEL_NAME, SDIST_NAME}
 SDIST_ROOT = "trueheart_core-0.1.0"
-ALLOWED_REQUIRES_DIST = {
+ALLOWED_REQUIRES_DIST = (
     'build<2,>=1.2; extra == "dev"',
     'mypy<2,>=1.15; extra == "dev"',
     'pytest<9,>=8; extra == "dev"',
     'ruff<1,>=0.11; extra == "dev"',
-}
+)
 
 
 class VerificationError(Exception):
@@ -54,16 +56,52 @@ def _verify_metadata(metadata_bytes: bytes, source: str) -> None:
         "License-Expression": "MIT",
     }
     for field, value in expected.items():
-        actual = metadata.get(field)
+        values = metadata.get_all(field, [])
+        if len(values) != 1:
+            raise VerificationError(f"{source}: {field} must appear exactly once")
+        actual = values[0]
         if actual != value:
             raise VerificationError(
                 f"{source}: {field} must be {value} (found {actual!r})"
             )
-    for requirement in metadata.get_all("Requires-Dist", []):
+    extras = metadata.get_all("Provides-Extra", [])
+    if extras != ["dev"]:
+        raise VerificationError(f"{source}: Provides-Extra must be exactly dev")
+
+    requirements = metadata.get_all("Requires-Dist", [])
+    for requirement in requirements:
         if requirement not in ALLOWED_REQUIRES_DIST:
             raise VerificationError(
                 f"{source}: unapproved Requires-Dist: {requirement}"
             )
+    if Counter(requirements) != Counter(ALLOWED_REQUIRES_DIST):
+        raise VerificationError(
+            f"{source}: Requires-Dist must match the exact dev dependency set"
+        )
+
+
+def _verify_member_name(name: str, archive: str, expected_root: str | None) -> None:
+    parts = name.split("/")
+    unsafe = (
+        not name
+        or "\\" in name
+        or name.startswith("/")
+        or any(part in {"", ".", ".."} for part in parts)
+        or any(":" in part for part in parts)
+        or (expected_root is not None and parts[0] != expected_root)
+    )
+    if unsafe:
+        raise VerificationError(f"unsafe {archive} member: {name}")
+
+
+def _verify_wheel_member(member: zipfile.ZipInfo) -> None:
+    _verify_member_name(member.filename, "wheel", expected_root=None)
+    if member.is_dir():
+        raise VerificationError(f"unsafe wheel member: {member.filename}")
+    if member.create_system == 3:
+        file_type = stat.S_IFMT(member.external_attr >> 16)
+        if file_type not in {0, stat.S_IFREG}:
+            raise VerificationError(f"unsafe wheel member: {member.filename}")
 
 
 def _wheel_record_hash(content: bytes) -> str:
@@ -77,7 +115,10 @@ def _verify_wheel(wheel_path: Path) -> None:
     record_name = f"{dist_info}/RECORD"
 
     with zipfile.ZipFile(wheel_path) as wheel:
-        archive_names = wheel.namelist()
+        members = wheel.infolist()
+        for member in members:
+            _verify_wheel_member(member)
+        archive_names = [member.filename for member in members]
         if len(archive_names) != len(set(archive_names)):
             raise VerificationError("wheel contains duplicate members")
         if metadata_name not in archive_names:
@@ -109,16 +150,6 @@ def _verify_wheel(wheel_path: Path) -> None:
                 raise VerificationError(f"wheel RECORD size mismatch: {name}")
 
 
-def _is_unsafe_tar_member(name: str) -> bool:
-    path = PurePosixPath(name)
-    return (
-        path.is_absolute()
-        or ".." in path.parts
-        or not path.parts
-        or path.parts[0] != SDIST_ROOT
-    )
-
-
 def _verify_sdist(sdist_path: Path) -> None:
     metadata_name = f"{SDIST_ROOT}/PKG-INFO"
     with tarfile.open(sdist_path, mode="r:gz") as sdist:
@@ -126,9 +157,8 @@ def _verify_sdist(sdist_path: Path) -> None:
         names: set[str] = set()
         metadata_member: tarfile.TarInfo | None = None
         for member in members:
-            if _is_unsafe_tar_member(member.name) or not (
-                member.isfile() or member.isdir()
-            ):
+            _verify_member_name(member.name, "sdist", expected_root=SDIST_ROOT)
+            if not (member.isfile() or member.isdir()):
                 raise VerificationError(f"unsafe sdist member: {member.name}")
             if member.name in names:
                 raise VerificationError(f"duplicate sdist member: {member.name}")
