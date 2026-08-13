@@ -1,14 +1,28 @@
 name: Release
 
 on:
+  workflow_dispatch:
   release:
     types: [published]
 
 permissions: {}
 
 jobs:
+  preflight:
+    name: Confirm release workflow registration
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Confirm dispatch is non-publishing
+        run: |
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test "$GITHUB_REF" = "refs/heads/main"
+          printf '%s\n' "Release workflow registered; no publication jobs were authorized."
+
   build:
     name: Build and verify distributions
+    if: ${{ github.event_name == 'release' && github.event.action == 'published' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -69,6 +83,7 @@ jobs:
   github-release:
     name: Upload GitHub Release assets
     needs: build
+    if: ${{ github.event_name == 'release' && github.event.action == 'published' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -93,6 +108,7 @@ jobs:
   pypi:
     name: Publish distributions to PyPI
     needs: build
+    if: ${{ github.event_name == 'release' && github.event.action == 'published' }}
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

@@ -80,7 +80,15 @@ Run the focused test, then all 174 existing tests plus the new tests, Ruff, form
 
 - [ ] **Step 5: Create the workflow**
 
-Trigger only on `release: types: [published]`. Build from `github.event.release.tag_name`, reject tags other than `v0.1.0`, use Python 3.13, install `build==1.5.0`, build, invoke the verifier, create a clean venv, install the wheel with `--no-deps`, run `pip check` and the example, then upload one artifact bundle. The GitHub asset job downloads and uploads `dist/*` plus `SHA256SUMS` to the existing release. The PyPI job downloads the same bundle, uses environment `pypi`, grants only `id-token: write`, and publishes only `dist/`.
+Support `release: types: [published]` plus a permissionless, main-only manual
+registration preflight. Give every build or publication job an explicit
+`release`/`published` event gate. Build from `github.event.release.tag_name`,
+reject tags other than `v0.1.0`, use Python 3.13, install `build==1.5.0`, build,
+invoke the verifier, create a clean venv, install the wheel with `--no-deps`,
+run `pip check` and the example, then upload one artifact bundle. The GitHub
+asset job downloads and uploads `dist/*` plus `SHA256SUMS` to the existing
+release. The PyPI job downloads the same bundle, uses environment `pypi`,
+grants only `id-token: write`, and publishes only `dist/`.
 
 - [ ] **Step 6: Validate workflow security**
 
