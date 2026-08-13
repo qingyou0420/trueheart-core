@@ -4,11 +4,14 @@ import base64
 import csv
 import hashlib
 import io
+import re
 import stat
 import subprocess
 import sys
 import tarfile
 import zipfile
+from email.parser import BytesParser
+from email.policy import default
 from pathlib import Path
 
 import pytest
@@ -35,6 +38,16 @@ SDIST_PYPROJECT = b"""\
 requires = ["setuptools==84.0.0"]
 build-backend = "setuptools.build_meta"
 """
+EXPECTED_PACKAGED_README_LINKS = {
+    "https://github.com/qingyou0420/trueheart-core/blob/main/examples/basic_memory.py",
+    "https://github.com/qingyou0420/trueheart-core/blob/main/docs/architecture.md",
+    "https://github.com/qingyou0420/trueheart-core/blob/main/docs/security-guarantees.md",
+    "https://github.com/qingyou0420/trueheart-core/blob/main/docs/threat-model.md",
+    "https://github.com/qingyou0420/trueheart-core/blob/main/SECURITY.md",
+    "https://github.com/qingyou0420/trueheart-core/blob/main/CONTRIBUTING.md",
+    "https://github.com/qingyou0420/trueheart-core/blob/main/SUPPORT.md",
+}
+MARKDOWN_LINK_TARGET = re.compile(r"(?<!!)\[[^]]+\]\(([^)]+)\)")
 
 
 def _metadata(
@@ -214,6 +227,28 @@ def _run_verifier(directory: Path) -> subprocess.CompletedProcess[str]:
 def _assert_rejected(result: subprocess.CompletedProcess[str], message: str) -> None:
     assert result.returncode != 0
     assert message in result.stderr
+
+
+def _packaged_readme_payloads(directory: Path) -> dict[str, str]:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    dist = _create_artifacts(directory, payload=readme)
+    with zipfile.ZipFile(dist / WHEEL_NAME) as wheel:
+        wheel_metadata = BytesParser(policy=default).parsebytes(
+            wheel.read("trueheart_core-0.1.0.dist-info/METADATA")
+        )
+    with tarfile.open(dist / SDIST_NAME, mode="r:gz") as sdist:
+        pkg_info = sdist.extractfile("trueheart_core-0.1.0/PKG-INFO")
+        assert pkg_info is not None
+        sdist_metadata = BytesParser(policy=default).parsebytes(pkg_info.read())
+
+    wheel_payload = wheel_metadata.get_payload(decode=True)
+    sdist_payload = sdist_metadata.get_payload(decode=True)
+    assert isinstance(wheel_payload, bytes)
+    assert isinstance(sdist_payload, bytes)
+    return {
+        "wheel": wheel_payload.decode("utf-8"),
+        "sdist": sdist_payload.decode("utf-8"),
+    }
 
 
 def test_verifier_rejects_artifacts_for_a_different_version(tmp_path: Path) -> None:
@@ -588,6 +623,29 @@ def test_verifier_rejects_a_wheel_with_a_tampered_record_hash(tmp_path: Path) ->
     result = _run_verifier(tmp_path)
 
     _assert_rejected(result, "wheel RECORD hash mismatch")
+
+
+@pytest.mark.parametrize("artifact", ["wheel", "sdist"])
+def test_packaged_readme_does_not_freeze_a_prepublication_status(
+    tmp_path: Path, artifact: str
+) -> None:
+    payload = _packaged_readme_payloads(tmp_path)[artifact]
+    normalized_payload = " ".join(payload.lower().split())
+
+    assert "not yet published" not in normalized_payload
+    assert "After successful package publication," in payload
+
+
+@pytest.mark.parametrize("artifact", ["wheel", "sdist"])
+def test_packaged_readme_uses_canonical_absolute_https_links(
+    tmp_path: Path, artifact: str
+) -> None:
+    payload = _packaged_readme_payloads(tmp_path)[artifact]
+
+    targets = MARKDOWN_LINK_TARGET.findall(payload)
+    non_anchor_targets = [target for target in targets if not target.startswith("#")]
+    assert all(target.startswith("https://") for target in non_anchor_targets)
+    assert EXPECTED_PACKAGED_README_LINKS <= set(non_anchor_targets)
 
 
 def test_verifier_accepts_safe_artifacts_and_writes_deterministic_checksums(
