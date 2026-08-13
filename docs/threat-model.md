@@ -1,6 +1,6 @@
 # Threat model
 
-TrueHeart Core 0.1.0 assumes event bodies, derived memory bodies, metadata,
+TrueHeart Core 0.1.1 assumes event bodies, derived memory bodies, metadata,
 identifiers, and contributions are untrusted. The local host and administrator
 are outside the trusted computing boundary. “Owner” below names the party
 responsible for the remaining decision or operation.
@@ -10,7 +10,7 @@ responsible for the remaining decision or operation.
 | Malicious or malformed event and memory bodies | Size and UTF-8 validation; content is stored as data and never executed or interpreted by the core; no model/network/shell/plugin calls | A host can place the body into a prompt, interpreter, renderer, log, or provider where it causes harm | Host application |
 | Malicious metadata | JSON-only, finite values, string keys, at most 64 container levels, integers of at most 4096 bits, 16 KiB serialized limit, immutable public projection, checked SQLite `json_valid` support and constraints | Valid JSON can contain deceptive or sensitive values that a host later misuses or exposes | Host application |
 | Hostile or sensitive identifiers | Non-blank bounded strings and parameterized SQL | IDs and scope components can still carry secrets, personal data, confusing Unicode, or disclosure through errors/audit | Caller and host application |
-| Scope confusion or cross-scope access | Every operation requires exact `Scope(tenant_id, owner_id, subject_id)` and fails closed on mismatches | Scope is caller-supplied isolation, not identity proof, authentication, authorization, or a service tenancy layer. Materialization and governance may reveal one-bit cross-scope ID existence through `ScopeMismatch`; IDs are sensitive and hosts must authorize both scope and ID use | Host application |
+| Scope confusion or cross-scope access | Every public operation that acts on scoped data requires exact `Scope(tenant_id, owner_id, subject_id)` and fails closed on mismatches. `expire_raw_content` is a whole-database maintenance operation that only expires eligible raw bodies by `as_of` | Scope is caller-supplied isolation, not identity proof, authentication, authorization, or a service tenancy layer. Materialization and governance may reveal one-bit cross-scope ID existence through `ScopeMismatch`; IDs are sensitive and hosts must authorize both scope and ID use | Host application |
 | Trust escalation | Typed trust levels and materialization ceiling at the least-trusted source; no automatic promotion | A caller can mislabel source trust, and trust does not establish truth | Caller and host application |
 | Memory poisoning and prompt injection | Explicit provenance and lineage; caller-authored memories; deterministic recall; the core never interprets content as instructions | The core cannot identify false/manipulative content, prevent injection, or control prompt assembly | Host application |
 | SQL injection or JSON/database corruption | Parameterized values, fixed table names, schema constraints, canonical JSON validation, exact schema-version checks, corruption errors without body disclosure | A malicious local administrator can alter database files or library code; denial of service and metadata disclosure remain possible | Host operator |

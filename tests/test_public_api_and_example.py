@@ -134,6 +134,27 @@ def test_basic_example_standalone_output_is_strict(tmp_path: Path) -> None:
     assert list(tmp_path.iterdir()) == []
 
 
+def test_downstream_mypy_consumes_scope_as_a_typed_export(tmp_path: Path) -> None:
+    consumer = tmp_path / "check.py"
+    consumer.write_text(
+        'from trueheart_core import Scope\ns = Scope("t", "o", "s")\nreveal_type(s)\n',
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-m", "mypy", "--strict", str(consumer)],
+        cwd=tmp_path,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    output = f"{result.stdout}{result.stderr}"
+
+    assert "Skipping analyzing" not in output
+    assert result.returncode == 0, output
+    assert "Scope" in output
+
+
 def test_readme_five_minute_example_starts_from_a_checkout() -> None:
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
     section = readme.split("## Five-minute example", 1)[1].split("## Lifecycle", 1)[0]
@@ -146,7 +167,7 @@ def test_readme_five_minute_example_starts_from_a_checkout() -> None:
 
     positions = tuple(section.index(command) for command in commands)
     assert positions == tuple(sorted(positions))
-    assert "trueheart-core==0.1.0" not in section
+    assert "trueheart-core==0.1.1" not in section
 
 
 def test_code_of_conduct_defines_private_route_and_original_provenance() -> None:
@@ -171,7 +192,7 @@ def test_security_guarantees_starts_with_its_introduction() -> None:
     )
     introduction = security_guarantees.splitlines()[2]
 
-    assert introduction.startswith("This document describes TrueHeart Core 0.1.0")
+    assert introduction.startswith("This document describes TrueHeart Core 0.1.1")
 
 
 def test_packaging_uses_pep_639_license_metadata() -> None:
@@ -182,3 +203,4 @@ def test_packaging_uses_pep_639_license_metadata() -> None:
     assert pyproject["project"]["license"] == "MIT"
     assert pyproject["project"]["license-files"] == ["LICENSE"]
     assert pyproject["project"]["dependencies"] == []
+    assert pyproject["project"]["version"] == "0.1.1"

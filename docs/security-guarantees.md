@@ -1,12 +1,14 @@
 # Security guarantees and boundaries
 
-This document describes TrueHeart Core 0.1.0. Guarantees apply to operations
+This document describes TrueHeart Core 0.1.1. Guarantees apply to operations
 performed through the library against the SQLite database it controls.
 
 ## Enforced by the core
 
-- Every public operation requires an exact caller-supplied `Scope`; mismatches
-  fail closed before content is returned.
+- Every public operation that acts on scoped data requires an exact
+  caller-supplied `Scope`; mismatches fail closed before content is returned.
+  `expire_raw_content` is a whole-database maintenance operation that only
+  expires eligible raw bodies by `as_of`.
 - A memory's declared trust cannot exceed its least-trusted source.
 - Bodies and JSON metadata are validated and bounded, datetimes require an
   offset and normalize to UTC, SQL values are parameterized, and schema names

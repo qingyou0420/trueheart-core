@@ -7,7 +7,9 @@
 - Keep runtime dependencies empty. The core must not perform network, model,
   plugin, shell, vector, or background-worker operations.
 - Require an exact `Scope(tenant_id, owner_id, subject_id)` for every public
-  operation and fail closed on mismatches.
+  operation that acts on scoped data and fail closed on mismatches.
+  `expire_raw_content` is a whole-database maintenance operation that only
+  expires eligible raw bodies by `as_of`.
 - Require timezone-aware public datetimes and normalize them to UTC.
 - Accept only JSON metadata of at most 16 KiB and non-empty UTF-8 content of at
   most 256 KiB.
