@@ -175,6 +175,11 @@ def test_materialize_writes_memory_and_all_edges_atomically(tmp_path: Path) -> N
             "AND subject_id = ? AND event_id = ?",
             ("tenant", "owner", "subject", "evt-1"),
         )
+        connection.execute(
+            "UPDATE raw_events SET status = ? WHERE tenant_id = ? AND owner_id = ? "
+            "AND subject_id = ? AND event_id = ?",
+            ("expired", "tenant", "owner", "subject", "evt-1"),
+        )
 
     record = service.materialize_once(_memory())
 
@@ -358,8 +363,8 @@ def test_tombstoned_id_or_dependency_fingerprint_cannot_rematerialize(
                     "memory",
                     "mem-blocked",
                     "2026-08-13T11:00:00.000000+00:00",
-                    "synthetic deletion",
-                    None,
+                    "governance requested",
+                    fingerprint,
                     "{}",
                 ),
                 (
@@ -369,7 +374,7 @@ def test_tombstoned_id_or_dependency_fingerprint_cannot_rematerialize(
                     "memory",
                     "old-memory-id",
                     "2026-08-13T11:00:00.000000+00:00",
-                    "synthetic deletion",
+                    "governance requested",
                     fingerprint,
                     "{}",
                 ),

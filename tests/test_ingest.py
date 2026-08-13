@@ -167,7 +167,7 @@ def test_tombstoned_event_id_cannot_be_reused(tmp_path: Path) -> None:
                 "raw_event",
                 "evt-1",
                 "2026-08-13T09:30:00.000000+00:00",
-                "synthetic deletion",
+                "governance requested",
                 None,
                 "{}",
             ),
@@ -180,6 +180,22 @@ def test_tombstoned_event_id_cannot_be_reused(tmp_path: Path) -> None:
     with sqlite3.connect(path) as connection:
         assert connection.execute("SELECT COUNT(*) FROM raw_events").fetchone() == (0,)
         assert connection.execute("SELECT COUNT(*) FROM audit_log").fetchone() == (0,)
+
+
+def test_ingest_replay_rejects_active_receipt_without_body(tmp_path: Path) -> None:
+    path = tmp_path / "missing-active-body.db"
+    service = _service(path)
+    service.ingest_event(_draft())
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "DELETE FROM raw_event_content WHERE event_id = ?", ("evt-1",)
+        )
+
+    with pytest.raises(RepositoryCorruption) as error:
+        service.ingest_event(_draft())
+
+    assert "synthetic message" not in str(error.value)
+    assert error.value.__cause__ is None
 
 
 def test_schema_version_newer_than_supported_fails_closed(tmp_path: Path) -> None:

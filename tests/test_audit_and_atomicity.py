@@ -244,6 +244,120 @@ def test_audit_and_tombstones_are_body_free_for_every_lifecycle_action(
     assert "content" not in tombstone_columns
 
 
+def test_caller_reason_matching_body_is_never_persisted_or_public(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "reason-body-free.db"
+    service = _service(path)
+    _add_memory(service, "mem-reason", "evt-reason")
+
+    command = GovernanceCommand(
+        scope=SCOPE,
+        action=GovernanceAction.FORGET,
+        entity_type=EntityType.MEMORY,
+        entity_id="mem-reason",
+        occurred_at=BASE + timedelta(seconds=1),
+        reason=BODY_SENTINEL,
+    )
+    result = service.govern(command)
+
+    assert result.command is command
+    records = service.audit(SCOPE)
+    assert BODY_SENTINEL not in repr(records)
+    governance_record = next(record for record in records if record.action == "forget")
+    assert governance_record.reason == "governance requested"
+    with sqlite3.connect(path) as connection:
+        audit_columns = connection.execute("PRAGMA table_info(audit_log)").fetchall()
+        audit_rows = connection.execute("SELECT * FROM audit_log").fetchall()
+        tombstone_columns = connection.execute(
+            "PRAGMA table_info(tombstones)"
+        ).fetchall()
+        tombstone_rows = connection.execute("SELECT * FROM tombstones").fetchall()
+    assert BODY_SENTINEL not in repr((audit_columns, audit_rows))
+    assert BODY_SENTINEL not in repr((tombstone_columns, tombstone_rows))
+
+
+@pytest.mark.parametrize("operation", ["expire", "govern", "audit"])
+@pytest.mark.parametrize(
+    "ledger",
+    ["missing", "empty", "zero", "zero-and-one", "text-one"],
+)
+def test_every_repository_transaction_requires_exact_schema_v1(
+    tmp_path: Path,
+    operation: str,
+    ledger: str,
+) -> None:
+    path = tmp_path / f"schema-{operation}-{ledger}.db"
+    service = _service(path)
+    service.ingest_event(
+        _event(
+            "evt-schema",
+            occurred_at=BASE - timedelta(hours=2),
+            raw_ttl=timedelta(hours=1),
+        )
+    )
+    with sqlite3.connect(path) as connection:
+        if ledger == "missing":
+            connection.execute("DROP TABLE schema_migrations")
+        elif ledger == "empty":
+            connection.execute("DELETE FROM schema_migrations")
+        elif ledger == "zero":
+            connection.execute("UPDATE schema_migrations SET version = 0")
+        elif ledger == "zero-and-one":
+            connection.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                (0, "2026-08-13T09:00:00.000000+00:00"),
+            )
+        else:
+            connection.execute("ALTER TABLE schema_migrations RENAME TO old_migrations")
+            connection.execute(
+                "CREATE TABLE schema_migrations (version TEXT, applied_at TEXT NOT NULL)"
+            )
+            connection.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                ("1", "2026-08-13T09:00:00.000000+00:00"),
+            )
+            connection.execute("DROP TABLE old_migrations")
+        before = {
+            table: connection.execute(
+                f"SELECT * FROM {table} ORDER BY rowid"
+            ).fetchall()
+            for table in (
+                "raw_events",
+                "raw_event_content",
+                "memories",
+                "memory_sources",
+                "audit_log",
+                "tombstones",
+            )
+        }
+
+    with pytest.raises(RepositoryCorruption) as error:
+        if operation == "expire":
+            service.expire_raw_content(as_of=BASE)
+        elif operation == "govern":
+            service.govern(
+                _command(
+                    GovernanceAction.DELETE,
+                    EntityType.RAW_EVENT,
+                    "evt-schema",
+                    seconds=1,
+                )
+            )
+        else:
+            service.audit(SCOPE)
+
+    assert error.value.__cause__ is None
+    with sqlite3.connect(path) as connection:
+        after = {
+            table: connection.execute(
+                f"SELECT * FROM {table} ORDER BY rowid"
+            ).fetchall()
+            for table in before
+        }
+    assert after == before
+
+
 def test_raw_delete_tombstone_failure_rolls_back_every_table(tmp_path: Path) -> None:
     path = tmp_path / "rollback.db"
     service = _service(path)
@@ -301,6 +415,8 @@ def test_raw_delete_tombstone_failure_rolls_back_every_table(tmp_path: Path) -> 
         ("metadata_json", "{private-audit-json-sentinel"),
         ("entity_type", "private-audit-type-sentinel"),
         ("action", "private-audit-action-sentinel"),
+        ("reason", "private-audit-reason-sentinel"),
+        ("metadata_json", '{"unexpected":true}'),
     ],
 )
 def test_audit_rejects_corrupt_rows_without_disclosure(
@@ -320,6 +436,38 @@ def test_audit_rejects_corrupt_rows_without_disclosure(
 
     assert value not in str(error.value)
     assert BODY_SENTINEL not in str(error.value)
+    assert error.value.__cause__ is None
+
+
+@pytest.mark.parametrize(
+    ("action", "entity_type"),
+    [
+        ("ingest", "memory"),
+        ("materialize", "raw_event"),
+        ("expire", "memory"),
+        ("seal", "raw_event"),
+        ("restore", "raw_event"),
+        ("forget", "raw_event"),
+    ],
+)
+def test_audit_rejects_impossible_action_entity_pairs(
+    tmp_path: Path,
+    action: str,
+    entity_type: str,
+) -> None:
+    path = tmp_path / f"audit-pair-{action}.db"
+    service = _service(path)
+    service.ingest_event(_event("evt-pair"))
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA ignore_check_constraints = ON")
+        connection.execute(
+            "UPDATE audit_log SET action = ?, entity_type = ?",
+            (action, entity_type),
+        )
+
+    with pytest.raises(RepositoryCorruption) as error:
+        service.audit(SCOPE)
+
     assert error.value.__cause__ is None
 
 

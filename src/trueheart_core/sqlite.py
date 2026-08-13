@@ -58,6 +58,19 @@ _AUDIT_ACTIONS = frozenset(
         *(action.value for action in GovernanceAction),
     }
 )
+_GOVERNANCE_REASON = "governance requested"
+_AUDIT_POLICY: dict[str, tuple[frozenset[EntityType], str]] = {
+    "ingest": (frozenset({EntityType.RAW_EVENT}), "event ingested"),
+    "materialize": (frozenset({EntityType.MEMORY}), "memory materialized"),
+    "expire": (frozenset({EntityType.RAW_EVENT}), "raw content expired"),
+    "seal": (frozenset({EntityType.MEMORY}), _GOVERNANCE_REASON),
+    "restore": (frozenset({EntityType.MEMORY}), _GOVERNANCE_REASON),
+    "forget": (frozenset({EntityType.MEMORY}), _GOVERNANCE_REASON),
+    "delete": (
+        frozenset({EntityType.RAW_EVENT, EntityType.MEMORY}),
+        _GOVERNANCE_REASON,
+    ),
+}
 
 _CURRENT_MEMORY_SOURCES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS memory_sources (
@@ -303,7 +316,6 @@ class SQLiteRepository:
                 raise RepositoryCorruption("incomplete schema")
             return True
 
-        cls._require_supported_schema(connection)
         version_rows = connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
@@ -388,17 +400,20 @@ class SQLiteRepository:
             ("table", "schema_migrations"),
         ).fetchone()
         if migration_table is None:
-            return
-        row = connection.execute(
-            "SELECT MAX(version) AS version FROM schema_migrations"
-        ).fetchone()
-        if row is None or row["version"] is None:
-            return
+            raise RepositoryCorruption("invalid schema version")
+        rows = connection.execute(
+            "SELECT version, typeof(version) AS version_type "
+            "FROM schema_migrations ORDER BY rowid"
+        ).fetchall()
         try:
-            version = int(row["version"])
-        except (TypeError, ValueError):
+            if len(rows) != 1:
+                raise ValueError
+            if SQLiteRepository._stored_text(rows[0], "version_type") != "integer":
+                raise ValueError
+            version = SQLiteRepository._stored_integer(rows[0], "version")
+        except (IndexError, KeyError, TypeError, ValueError):
             raise RepositoryCorruption("invalid schema version") from None
-        if version > SCHEMA_VERSION:
+        if version != SCHEMA_VERSION:
             raise RepositoryCorruption("unsupported schema version")
 
     @staticmethod
@@ -421,16 +436,15 @@ class SQLiteRepository:
             connection = self._connect()
             connection.execute("BEGIN IMMEDIATE")
             self._require_supported_schema(connection)
-            tombstone = connection.execute(
-                "SELECT 1 FROM tombstones WHERE tenant_id = ? AND owner_id = ? "
-                "AND subject_id = ? AND entity_type = ? AND entity_id = ?",
-                (
-                    *_scope_values(draft.scope),
-                    EntityType.RAW_EVENT.value,
-                    draft.event_id,
-                ),
-            ).fetchone()
-            if tombstone is not None:
+            tombstones = self._find_tombstones(
+                connection,
+                scope=draft.scope,
+                entity_id=draft.event_id,
+            )
+            if any(
+                entity_type is EntityType.RAW_EVENT
+                for _scope, entity_type, _entity_id in tombstones
+            ):
                 raise EntityDeleted(draft.event_id)
             existing = connection.execute(
                 "SELECT raw_events.*, "
@@ -544,20 +558,25 @@ class SQLiteRepository:
             self._require_supported_schema(connection)
             scope = _scope_values(draft.scope)
 
-            identifier_tombstone = connection.execute(
-                "SELECT 1 FROM tombstones WHERE tenant_id = ? AND owner_id = ? "
-                "AND subject_id = ? AND entity_type = ? AND entity_id = ?",
-                (*scope, EntityType.MEMORY.value, draft.memory_id),
-            ).fetchone()
-            if identifier_tombstone is not None:
+            identifier_tombstones = self._find_tombstones(
+                connection,
+                scope=draft.scope,
+                entity_id=draft.memory_id,
+            )
+            if any(
+                entity_type is EntityType.MEMORY
+                for _scope, entity_type, _entity_id in identifier_tombstones
+            ):
                 raise EntityDeleted(draft.memory_id)
-            fingerprint_tombstone = connection.execute(
-                "SELECT 1 FROM tombstones WHERE tenant_id = ? AND owner_id = ? "
-                "AND subject_id = ? AND entity_type = ? "
-                "AND dependency_fingerprint = ?",
-                (*scope, EntityType.MEMORY.value, dependency_fingerprint),
-            ).fetchone()
-            if fingerprint_tombstone is not None:
+            fingerprint_tombstones = self._find_tombstones(
+                connection,
+                scope=draft.scope,
+                dependency_fingerprint=dependency_fingerprint,
+            )
+            if any(
+                entity_type is EntityType.MEMORY
+                for _scope, entity_type, _entity_id in fingerprint_tombstones
+            ):
                 raise EntityDeleted(draft.memory_id)
 
             existing = connection.execute(
@@ -598,13 +617,15 @@ class SQLiteRepository:
                     (*scope, event_id),
                 ).fetchone()
                 if row is None:
-                    deleted = connection.execute(
-                        "SELECT 1 FROM tombstones WHERE tenant_id = ? "
-                        "AND owner_id = ? AND subject_id = ? AND entity_type = ? "
-                        "AND entity_id = ?",
-                        (*scope, EntityType.RAW_EVENT.value, event_id),
-                    ).fetchone()
-                    if deleted is not None:
+                    deleted = self._find_tombstones(
+                        connection,
+                        scope=draft.scope,
+                        entity_id=event_id,
+                    )
+                    if any(
+                        entity_type is EntityType.RAW_EVENT
+                        for _scope, entity_type, _entity_id in deleted
+                    ):
                         raise EntityDeleted(event_id)
                     other_scope = connection.execute(
                         "SELECT 1 FROM raw_events WHERE event_id = ? LIMIT 1",
@@ -1064,6 +1085,16 @@ class SQLiteRepository:
             action = SQLiteRepository._stored_text(row, "action")
             if action not in _AUDIT_ACTIONS:
                 raise ValueError
+            entity_type = EntityType(SQLiteRepository._stored_text(row, "entity_type"))
+            allowed_entity_types, expected_reason = _AUDIT_POLICY[action]
+            if entity_type not in allowed_entity_types:
+                raise ValueError
+            reason = SQLiteRepository._stored_text(row, "reason")
+            if reason != expected_reason:
+                raise ValueError
+            metadata = SQLiteRepository._stored_metadata(row, "metadata_json")
+            if metadata != {}:
+                raise ValueError
             return AuditRecord(
                 audit_id=SQLiteRepository._stored_text(row, "audit_id"),
                 scope=Scope(
@@ -1072,13 +1103,11 @@ class SQLiteRepository:
                     SQLiteRepository._stored_text(row, "subject_id"),
                 ),
                 action=action,
-                entity_type=EntityType(
-                    SQLiteRepository._stored_text(row, "entity_type")
-                ),
+                entity_type=entity_type,
                 entity_id=SQLiteRepository._stored_text(row, "entity_id"),
                 occurred_at=SQLiteRepository._stored_datetime(row, "occurred_at"),
-                reason=SQLiteRepository._stored_text(row, "reason"),
-                metadata=SQLiteRepository._stored_metadata(row, "metadata_json"),
+                reason=reason,
+                metadata=metadata,
             )
         except (
             IndexError,
@@ -1171,7 +1200,13 @@ class SQLiteRepository:
             raise InvalidTransition(command.entity_id)
         scope = _scope_values(command.scope)
         row = connection.execute(
-            "SELECT event_id FROM raw_events WHERE tenant_id = ? AND owner_id = ? "
+            "SELECT raw_events.*, "
+            "EXISTS(SELECT 1 FROM raw_event_content AS content "
+            "WHERE content.tenant_id = raw_events.tenant_id "
+            "AND content.owner_id = raw_events.owner_id "
+            "AND content.subject_id = raw_events.subject_id "
+            "AND content.event_id = raw_events.event_id) AS content_available "
+            "FROM raw_events WHERE tenant_id = ? AND owner_id = ? "
             "AND subject_id = ? AND event_id = ?",
             (*scope, command.entity_id),
         ).fetchone()
@@ -1179,12 +1214,13 @@ class SQLiteRepository:
             self._raise_missing_entity(connection, command)
         assert row is not None
         try:
-            if self._stored_text(row, "event_id") != command.entity_id:
+            receipt = self._receipt(row)
+            if receipt.event_id != command.entity_id or receipt.scope != command.scope:
                 raise ValueError
             dependent_rows = connection.execute(
                 "SELECT memories.memory_id, memories.dependency_fingerprint, "
-                "memories.kind "
-                "FROM memory_sources AS edges JOIN memories "
+                "memories.kind, edges.memory_id AS edge_memory_id "
+                "FROM memory_sources AS edges LEFT JOIN memories "
                 "ON memories.tenant_id = edges.tenant_id "
                 "AND memories.owner_id = edges.owner_id "
                 "AND memories.subject_id = edges.subject_id "
@@ -1196,7 +1232,10 @@ class SQLiteRepository:
             ).fetchall()
             dependents: list[tuple[str, str]] = []
             for dependent_row in dependent_rows:
+                edge_memory_id = self._stored_text(dependent_row, "edge_memory_id")
                 memory_id = self._stored_text(dependent_row, "memory_id")
+                if memory_id != edge_memory_id:
+                    raise ValueError
                 fingerprint = self._stored_text(dependent_row, "dependency_fingerprint")
                 kind = self._stored_text(dependent_row, "kind")
                 if fingerprint != self._lineage_fingerprint(
@@ -1258,7 +1297,16 @@ class SQLiteRepository:
         kind: str,
     ) -> str:
         source_rows = connection.execute(
-            "SELECT edges.event_id, receipts.event_id AS receipt_event_id "
+            "SELECT edges.memory_id AS edge_memory_id, edges.event_id, "
+            "edges.source_trust_snapshot, "
+            "edges.clear_for_microseconds_snapshot, "
+            "edges.recall_for_microseconds_snapshot, receipts.*, "
+            "receipts.event_id AS receipt_event_id, "
+            "EXISTS(SELECT 1 FROM raw_event_content AS content "
+            "WHERE content.tenant_id = receipts.tenant_id "
+            "AND content.owner_id = receipts.owner_id "
+            "AND content.subject_id = receipts.subject_id "
+            "AND content.event_id = receipts.event_id) AS content_available "
             "FROM memory_sources AS edges LEFT JOIN raw_events AS receipts "
             "ON receipts.tenant_id = edges.tenant_id "
             "AND receipts.owner_id = edges.owner_id "
@@ -1272,13 +1320,44 @@ class SQLiteRepository:
         try:
             source_event_ids: list[str] = []
             for source_row in source_rows:
+                if cls._stored_text(source_row, "edge_memory_id") != memory_id:
+                    raise ValueError
                 event_id = cls._stored_text(source_row, "event_id")
                 if cls._stored_text(source_row, "receipt_event_id") != event_id:
                     raise ValueError
+                receipt = cls._receipt(source_row)
+                if receipt.scope != scope or receipt.event_id != event_id:
+                    raise ValueError
+                source_trust_snapshot = TrustLevel(
+                    cls._stored_integer(source_row, "source_trust_snapshot")
+                )
+                clear_snapshot = cls._stored_integer(
+                    source_row, "clear_for_microseconds_snapshot"
+                )
+                recall_snapshot = cls._stored_integer(
+                    source_row, "recall_for_microseconds_snapshot"
+                )
+                if (
+                    clear_snapshot <= 0
+                    or recall_snapshot < clear_snapshot
+                    or source_trust_snapshot is not receipt.source.trust
+                    or clear_snapshot != _timedelta_microseconds(receipt.clear_for)
+                    or recall_snapshot != _timedelta_microseconds(receipt.recall_for)
+                ):
+                    raise ValueError
                 source_event_ids.append(event_id)
-            if not source_event_ids:
+            if not source_event_ids or len(source_event_ids) != len(
+                set(source_event_ids)
+            ):
                 raise ValueError
-        except (IndexError, KeyError, TypeError, ValueError):
+        except (
+            IndexError,
+            KeyError,
+            TypeError,
+            ValueError,
+            ValidationError,
+            RepositoryCorruption,
+        ):
             raise RepositoryCorruption("invalid memory lineage") from None
         return _dependency_fingerprint(scope, kind, tuple(source_event_ids))
 
@@ -1287,19 +1366,15 @@ class SQLiteRepository:
         connection: sqlite3.Connection,
         command: GovernanceCommand,
     ) -> None:
-        scope = _scope_values(command.scope)
-        tombstone = connection.execute(
-            "SELECT entity_id FROM tombstones WHERE tenant_id = ? "
-            "AND owner_id = ? AND subject_id = ? AND entity_type = ? "
-            "AND entity_id = ?",
-            (*scope, command.entity_type.value, command.entity_id),
-        ).fetchone()
-        if tombstone is not None:
-            try:
-                if self._stored_text(tombstone, "entity_id") != command.entity_id:
-                    raise ValueError
-            except (IndexError, KeyError, TypeError, ValueError):
-                raise RepositoryCorruption("invalid tombstone") from None
+        tombstones = self._find_tombstones(
+            connection,
+            entity_id=command.entity_id,
+        )
+        exact_tombstone = any(
+            row_scope == command.scope and entity_type is command.entity_type
+            for row_scope, entity_type, _entity_id in tombstones
+        )
+        if exact_tombstone:
             raise EntityDeleted(command.entity_id)
 
         table = (
@@ -1312,13 +1387,78 @@ class SQLiteRepository:
             f"SELECT 1 FROM {table} WHERE {identifier_column} = ? LIMIT 1",
             (command.entity_id,),
         ).fetchone()
-        deleted_elsewhere = connection.execute(
-            "SELECT 1 FROM tombstones WHERE entity_type = ? AND entity_id = ? LIMIT 1",
-            (command.entity_type.value, command.entity_id),
-        ).fetchone()
-        if current_elsewhere is not None or deleted_elsewhere is not None:
+        deleted_elsewhere = any(
+            entity_type is command.entity_type and row_scope != command.scope
+            for row_scope, entity_type, _entity_id in tombstones
+        )
+        if current_elsewhere is not None or deleted_elsewhere:
             raise ScopeMismatch(command.entity_id)
         raise EntityNotFound(command.entity_id)
+
+    @classmethod
+    def _find_tombstones(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        scope: Scope | None = None,
+        entity_id: str | None = None,
+        dependency_fingerprint: str | None = None,
+    ) -> list[tuple[Scope, EntityType, str]]:
+        if entity_id is None and dependency_fingerprint is None:
+            raise RepositoryCorruption("invalid tombstone lookup")
+        clauses: list[str] = []
+        parameters: list[str] = []
+        if scope is not None:
+            clauses.extend(["tenant_id = ?", "owner_id = ?", "subject_id = ?"])
+            parameters.extend(_scope_values(scope))
+        if entity_id is not None:
+            clauses.append("entity_id = ?")
+            parameters.append(entity_id)
+        if dependency_fingerprint is not None:
+            clauses.append("dependency_fingerprint = ?")
+            parameters.append(dependency_fingerprint)
+        rows = connection.execute(
+            "SELECT tenant_id, owner_id, subject_id, entity_type, entity_id, "
+            "deleted_at, reason, dependency_fingerprint, metadata_json "
+            f"FROM tombstones WHERE {' AND '.join(clauses)}",
+            tuple(parameters),
+        ).fetchall()
+        return [cls._tombstone_identity(row) for row in rows]
+
+    @classmethod
+    def _tombstone_identity(cls, row: sqlite3.Row) -> tuple[Scope, EntityType, str]:
+        try:
+            scope = Scope(
+                cls._stored_text(row, "tenant_id"),
+                cls._stored_text(row, "owner_id"),
+                cls._stored_text(row, "subject_id"),
+            )
+            entity_type = EntityType(cls._stored_text(row, "entity_type"))
+            entity_id = cls._stored_text(row, "entity_id")
+            cls._stored_datetime(row, "deleted_at")
+            if cls._stored_text(row, "reason") != _GOVERNANCE_REASON:
+                raise ValueError
+            if cls._stored_metadata(row, "metadata_json") != {}:
+                raise ValueError
+            fingerprint = row["dependency_fingerprint"]
+            if entity_type is EntityType.RAW_EVENT:
+                if fingerprint is not None:
+                    raise ValueError
+            elif (
+                type(fingerprint) is not str
+                or len(fingerprint) != 64
+                or any(character not in "0123456789abcdef" for character in fingerprint)
+            ):
+                raise ValueError
+            return scope, entity_type, entity_id
+        except (
+            IndexError,
+            KeyError,
+            TypeError,
+            ValueError,
+            ValidationError,
+        ):
+            raise RepositoryCorruption("invalid tombstone") from None
 
     @staticmethod
     def _insert_tombstone(
@@ -1339,7 +1479,8 @@ class SQLiteRepository:
                 entity_type.value,
                 entity_id,
                 _datetime_text(command.occurred_at),
-                command.reason,
+                # Caller-controlled reason may equal body content. Never persist it.
+                _GOVERNANCE_REASON,
                 dependency_fingerprint,
                 "{}",
             ),
@@ -1361,7 +1502,8 @@ class SQLiteRepository:
                 command.entity_type.value,
                 command.entity_id,
                 _datetime_text(command.occurred_at),
-                command.reason,
+                # Audit storage is intentionally independent of caller prose.
+                _GOVERNANCE_REASON,
                 "{}",
             ),
         )
@@ -1414,7 +1556,7 @@ class SQLiteRepository:
             content_available = row["content_available"]
             if type(content_available) is not int or content_available not in (0, 1):
                 raise TypeError
-            if status == "expired" and content_available != 0:
+            if content_available != (1 if status == "active" else 0):
                 raise ValueError
             return RawEventReceipt(
                 event_id=SQLiteRepository._stored_text(row, "event_id"),

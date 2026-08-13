@@ -28,6 +28,14 @@ from trueheart_core import (
 SCOPE = Scope("tenant", "owner", "subject")
 OTHER_SCOPE = Scope("tenant", "owner", "other-subject")
 NOW = datetime(2026, 8, 13, 12, tzinfo=UTC)
+TABLES = (
+    "raw_events",
+    "raw_event_content",
+    "memories",
+    "memory_sources",
+    "audit_log",
+    "tombstones",
+)
 
 
 def _service(path: Path) -> TrueHeart:
@@ -104,6 +112,16 @@ def _add_memory(
     for event_id in event_ids:
         service.ingest_event(_event(event_id, scope=scope))
     service.materialize_once(_memory(memory_id, event_ids, scope=scope, kind=kind))
+
+
+def _snapshot(path: Path) -> dict[str, list[tuple[object, ...]]]:
+    with sqlite3.connect(path) as connection:
+        return {
+            table: connection.execute(
+                f"SELECT * FROM {table} ORDER BY rowid"
+            ).fetchall()
+            for table in TABLES
+        }
 
 
 def test_seal_excludes_active_memory_and_restore_recalls_it(tmp_path: Path) -> None:
@@ -316,6 +334,222 @@ def test_memory_governance_rejects_lineage_without_source_receipt(
         assert connection.execute(
             "SELECT COUNT(*) FROM audit_log WHERE action = ?", ("seal",)
         ).fetchone() == (0,)
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("status", "corrupt-status"),
+        ("raw_expires_at", "corrupt-time"),
+        ("source_metadata_json", "{corrupt-json"),
+        ("content_hash", "not-a-hash"),
+        ("clear_for_microseconds", 0),
+        ("recall_for_microseconds", 0),
+    ],
+)
+def test_raw_delete_validates_full_receipt_before_any_mutation(
+    tmp_path: Path,
+    column: str,
+    value: object,
+) -> None:
+    path = tmp_path / f"raw-corrupt-{column}.db"
+    service = _service(path)
+    _add_memory(service, "mem-raw-corrupt", ("evt-raw-corrupt",))
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA ignore_check_constraints = ON")
+        connection.execute(
+            f"UPDATE raw_events SET {column} = ? WHERE event_id = ?",
+            (value, "evt-raw-corrupt"),
+        )
+    before = _snapshot(path)
+
+    with pytest.raises(RepositoryCorruption) as error:
+        service.govern(
+            _command(
+                GovernanceAction.DELETE,
+                EntityType.RAW_EVENT,
+                "evt-raw-corrupt",
+            )
+        )
+
+    assert str(value) not in str(error.value)
+    assert error.value.__cause__ is None
+    assert _snapshot(path) == before
+
+
+@pytest.mark.parametrize("state", ["active-without-body", "expired-with-body"])
+def test_raw_receipt_status_must_match_content_availability(
+    tmp_path: Path,
+    state: str,
+) -> None:
+    path = tmp_path / f"raw-state-{state}.db"
+    service = _service(path)
+    service.ingest_event(_event("evt-state"))
+    with sqlite3.connect(path) as connection:
+        if state == "active-without-body":
+            connection.execute(
+                "DELETE FROM raw_event_content WHERE event_id = ?", ("evt-state",)
+            )
+        else:
+            connection.execute(
+                "UPDATE raw_events SET status = ? WHERE event_id = ?",
+                ("expired", "evt-state"),
+            )
+    before = _snapshot(path)
+
+    with pytest.raises(RepositoryCorruption) as error:
+        service.govern(
+            _command(GovernanceAction.DELETE, EntityType.RAW_EVENT, "evt-state")
+        )
+
+    assert error.value.__cause__ is None
+    assert _snapshot(path) == before
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("source_trust_snapshot", 9),
+        ("clear_for_microseconds_snapshot", 0),
+        ("recall_for_microseconds_snapshot", 1),
+        ("source_trust_snapshot", int(TrustLevel.CONFIRMED)),
+    ],
+    ids=["trust-range", "clear-positive", "recall-order", "receipt-consistency"],
+)
+@pytest.mark.parametrize("target", ["memory", "raw"])
+def test_governance_validates_lineage_snapshots_before_mutation(
+    tmp_path: Path,
+    target: str,
+    column: str,
+    value: object,
+) -> None:
+    path = tmp_path / f"lineage-{target}-{column}-{value}.db"
+    service = _service(path)
+    _add_memory(service, "mem-lineage", ("evt-lineage",))
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA ignore_check_constraints = ON")
+        connection.execute(f"UPDATE memory_sources SET {column} = ?", (value,))
+    before = _snapshot(path)
+
+    command = (
+        _command(GovernanceAction.FORGET, EntityType.MEMORY, "mem-lineage")
+        if target == "memory"
+        else _command(GovernanceAction.DELETE, EntityType.RAW_EVENT, "evt-lineage")
+    )
+    with pytest.raises(RepositoryCorruption) as error:
+        service.govern(command)
+
+    assert error.value.__cause__ is None
+    assert _snapshot(path) == before
+
+
+def test_raw_delete_rejects_dangling_memory_endpoint_before_mutation(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "dangling-memory-edge.db"
+    service = _service(path)
+    _add_memory(service, "mem-dangling", ("evt-dangling",))
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute(
+            "DELETE FROM memories WHERE memory_id = ?", ("mem-dangling",)
+        )
+    before = _snapshot(path)
+
+    with pytest.raises(RepositoryCorruption) as error:
+        service.govern(
+            _command(GovernanceAction.DELETE, EntityType.RAW_EVENT, "evt-dangling")
+        )
+
+    assert error.value.__cause__ is None
+    assert _snapshot(path) == before
+
+
+@pytest.mark.parametrize(
+    ("entity_type", "column", "value"),
+    [
+        ("raw_event", "deleted_at", "corrupt-time"),
+        ("raw_event", "reason", "caller-reason"),
+        ("raw_event", "metadata_json", '{"unexpected":true}'),
+        ("raw_event", "entity_type", "unknown"),
+        ("raw_event", "dependency_fingerprint", "a" * 64),
+        ("memory", "dependency_fingerprint", None),
+        ("memory", "dependency_fingerprint", "not-a-fingerprint"),
+    ],
+)
+def test_lifecycle_diagnosis_rejects_malformed_tombstones(
+    tmp_path: Path,
+    entity_type: str,
+    column: str,
+    value: object,
+) -> None:
+    path = tmp_path / f"tombstone-{entity_type}-{column}.db"
+    service = _service(path)
+    entity_id = "deleted-id"
+    fingerprint = None if entity_type == "raw_event" else "a" * 64
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA ignore_check_constraints = ON")
+        connection.execute(
+            "INSERT INTO tombstones (tenant_id, owner_id, subject_id, entity_type, "
+            "entity_id, deleted_at, reason, dependency_fingerprint, metadata_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                *(_scope_values := (SCOPE.tenant_id, SCOPE.owner_id, SCOPE.subject_id)),
+                entity_type,
+                entity_id,
+                "2026-08-13T12:00:00.000000+00:00",
+                "governance requested",
+                fingerprint,
+                "{}",
+            ),
+        )
+        connection.execute(
+            f"UPDATE tombstones SET {column} = ? WHERE entity_id = ?",
+            (value, entity_id),
+        )
+
+    requested_type = (
+        EntityType.MEMORY if entity_type == "memory" else EntityType.RAW_EVENT
+    )
+    with pytest.raises(RepositoryCorruption) as error:
+        service.govern(_command(GovernanceAction.DELETE, requested_type, entity_id))
+
+    assert error.value.__cause__ is None
+
+
+def test_scope_mismatch_diagnosis_validates_other_scope_tombstone(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "cross-scope-corrupt-tombstone.db"
+    service = _service(path)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO tombstones (tenant_id, owner_id, subject_id, entity_type, "
+            "entity_id, deleted_at, reason, dependency_fingerprint, metadata_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                OTHER_SCOPE.tenant_id,
+                OTHER_SCOPE.owner_id,
+                OTHER_SCOPE.subject_id,
+                "raw_event",
+                "cross-scope-deleted",
+                "corrupt-time",
+                "governance requested",
+                None,
+                "{}",
+            ),
+        )
+
+    with pytest.raises(RepositoryCorruption) as error:
+        service.govern(
+            _command(
+                GovernanceAction.DELETE,
+                EntityType.RAW_EVENT,
+                "cross-scope-deleted",
+            )
+        )
+
+    assert error.value.__cause__ is None
 
 
 def test_governance_scope_diagnosis_prefers_exact_scope_without_body_projection(
