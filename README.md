@@ -172,6 +172,8 @@ and report vulnerabilities privately as described in
 ## Status
 
 Version 0.1.0 is published on PyPI from this public source repository and keeps
-an intentionally small API. Semantic search, embeddings, model integration,
+an intentionally small API. A point-in-time
+[code review of 0.1.0 (in Chinese)](https://github.com/qingyou0420/trueheart-core/blob/main/docs/reviews/2026-08-13-v0.1.0-code-review.md)
+covers `main` at commit `bda22c7`; it is a snapshot, not a living guarantee. Semantic search, embeddings, model integration,
 service authentication, provider deletion, backup management, and encryption
 at rest are out of scope.
