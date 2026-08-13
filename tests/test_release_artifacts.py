@@ -39,6 +39,8 @@ requires = ["setuptools==84.0.0"]
 build-backend = "setuptools.build_meta"
 """
 EXPECTED_PACKAGED_README_LINKS = {
+    "https://pypi.org/project/trueheart-core/0.1.0/",
+    "https://github.com/qingyou0420/trueheart-openai-agents-example",
     "https://github.com/qingyou0420/trueheart-core/blob/main/examples/basic_memory.py",
     "https://github.com/qingyou0420/trueheart-core/blob/main/docs/architecture.md",
     "https://github.com/qingyou0420/trueheart-core/blob/main/docs/security-guarantees.md",
@@ -639,14 +641,41 @@ def test_verifier_rejects_a_wheel_with_a_tampered_record_hash(tmp_path: Path) ->
 
 
 @pytest.mark.parametrize("artifact", ["wheel", "sdist"])
-def test_packaged_readme_does_not_freeze_a_prepublication_status(
+def test_packaged_readme_records_verified_publication_and_integration(
     tmp_path: Path, artifact: str
 ) -> None:
     payload = _packaged_readme_payloads(tmp_path)[artifact]
     normalized_payload = " ".join(payload.lower().split())
 
     assert "not yet published" not in normalized_payload
-    assert "After successful package publication," in payload
+    assert "after successful package publication" not in normalized_payload
+    assert "trueheart core 0.1.0 is available from" in normalized_payload
+
+
+@pytest.mark.parametrize("artifact", ["wheel", "sdist"])
+def test_packaged_readme_identifies_the_maintainer_owned_integration_dependency(
+    tmp_path: Path, artifact: str
+) -> None:
+    payload = _packaged_readme_payloads(tmp_path)[artifact]
+    normalized_payload = " ".join(payload.lower().split())
+
+    assert "## Integrations" in payload
+    assert "maintainer-owned" in normalized_payload
+    assert "`openai-agents`" in payload
+
+
+@pytest.mark.parametrize("artifact", ["wheel", "sdist"])
+def test_packaged_readme_keeps_model_and_network_activity_outside_core(
+    tmp_path: Path, artifact: str
+) -> None:
+    payload = _packaged_readme_payloads(tmp_path)[artifact]
+    normalized_payload = " ".join(payload.lower().split())
+
+    assert "model api calls" in normalized_payload
+    assert "network traffic" in normalized_payload
+    assert "occur in the host application" in normalized_payload
+    assert "outside TrueHeart Core's" in payload
+    assert "runtime boundary" in payload
 
 
 @pytest.mark.parametrize("artifact", ["wheel", "sdist"])
