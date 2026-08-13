@@ -86,9 +86,8 @@ transaction. Forgetting a memory does not delete its source events.
 
 ## Installation
 
-The source repository is public. Publishing the `v0.1.0` GitHub Release will
-run the package publication workflow. After successful package publication,
-install from PyPI with:
+TrueHeart Core 0.1.0 is available from
+[PyPI](https://pypi.org/project/trueheart-core/0.1.0/):
 
 ```console
 python -m pip install trueheart-core==0.1.0
@@ -102,6 +101,15 @@ python -m pip install -e ".[dev]"
 
 The default adapter stores bodies as plaintext in local SQLite. Version 0.1
 provides no encryption at rest.
+
+## Integrations
+
+The maintainer-owned
+[OpenAI Agents SDK integration example](https://github.com/qingyou0420/trueheart-openai-agents-example)
+shows a host-owned, bounded memory integration and depends on `openai-agents`.
+Any explicitly initiated model API calls and associated network traffic occur
+in the host application, outside TrueHeart Core's dependency-free,
+model-independent, and network-independent runtime boundary.
 
 ## Security boundaries
 
@@ -163,7 +171,7 @@ and report vulnerabilities privately as described in
 
 ## Status
 
-Version 0.1.0 has a public source repository and an intentionally small API.
-Publishing the `v0.1.0` GitHub Release runs the package publication workflow.
-Semantic search, embeddings, model integration, service authentication,
-provider deletion, backup management, and encryption at rest are out of scope.
+Version 0.1.0 is published on PyPI from this public source repository and keeps
+an intentionally small API. Semantic search, embeddings, model integration,
+service authentication, provider deletion, backup management, and encryption
+at rest are out of scope.
