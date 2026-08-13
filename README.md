@@ -53,7 +53,8 @@ The example uses `TemporaryDirectory`, creates one local file-backed SQLite
 database, ingests a `RawEventDraft`, creates a caller-authored `MemoryDraft`,
 and recalls it with a `RecallQuery`. It reads no environment variables, makes
 no network requests, and removes the temporary database on exit. See
-[`examples/basic_memory.py`](examples/basic_memory.py) for the full code.
+[`examples/basic_memory.py`](https://github.com/qingyou0420/trueheart-core/blob/main/examples/basic_memory.py)
+for the full code.
 
 The high-level API is `TrueHeart`:
 
@@ -85,8 +86,9 @@ transaction. Forgetting a memory does not delete its source events.
 
 ## Installation
 
-PyPI installation will be available after release; this does not claim that the
-package is published yet:
+The source repository is public. Publishing the `v0.1.0` GitHub Release will
+run the package publication workflow. After successful package publication,
+install from PyPI with:
 
 ```console
 python -m pip install trueheart-core==0.1.0
@@ -122,8 +124,12 @@ Metadata is limited to 64 JSON container levels, integer magnitude of at most
 for the standard `json_valid` function when it opens a connection and fails
 closed if that required capability is unavailable.
 
-Read [security guarantees](docs/security-guarantees.md), the
-[threat model](docs/threat-model.md), and [security reporting](SECURITY.md)
+Read the
+[security guarantees](https://github.com/qingyou0420/trueheart-core/blob/main/docs/security-guarantees.md),
+the
+[threat model](https://github.com/qingyou0420/trueheart-core/blob/main/docs/threat-model.md),
+and
+[security reporting](https://github.com/qingyou0420/trueheart-core/blob/main/SECURITY.md)
 before using the library with sensitive data.
 
 ## Architecture
@@ -131,7 +137,8 @@ before using the library with sensitive data.
 Immutable domain contracts feed the `TrueHeart` lifecycle service, which uses
 an internal repository boundary implemented by `SQLiteRepository`. Policy and
 validation live in the domain/service layer; persistence, transactions, and
-projection assembly live in the adapter. See [architecture](docs/architecture.md).
+projection assembly live in the adapter. See the
+[architecture](https://github.com/qingyou0420/trueheart-core/blob/main/docs/architecture.md).
 
 ## Development
 
@@ -147,13 +154,16 @@ Tests and examples use synthetic data and temporary file-backed databases.
 
 ## Contributing
 
-Contributions are welcome under the requirements in [CONTRIBUTING.md](CONTRIBUTING.md).
-Report ordinary usage questions as described in [SUPPORT.md](SUPPORT.md), and
-report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
+Contributions are welcome under the requirements in
+[CONTRIBUTING.md](https://github.com/qingyou0420/trueheart-core/blob/main/CONTRIBUTING.md).
+Report ordinary usage questions as described in
+[SUPPORT.md](https://github.com/qingyou0420/trueheart-core/blob/main/SUPPORT.md),
+and report vulnerabilities privately as described in
+[SECURITY.md](https://github.com/qingyou0420/trueheart-core/blob/main/SECURITY.md).
 
 ## Status
 
-Version 0.1.0 is prepared for initial public review; repository publication and
-package release are separate operations. Its API is intentionally small.
+Version 0.1.0 has a public source repository and an intentionally small API.
+Publishing the `v0.1.0` GitHub Release runs the package publication workflow.
 Semantic search, embeddings, model integration, service authentication,
 provider deletion, backup management, and encryption at rest are out of scope.

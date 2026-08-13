@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+jobs:
+  build:
+    name: Build and verify distributions
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Validate release tag
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if [ "$RELEASE_TAG" != "v0.1.0" ]; then
+            echo "Refusing unexpected release tag: $RELEASE_TAG" >&2
+            exit 1
+          fi
+      - name: Check out release event commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: "0"
+          persist-credentials: false
+      - name: Verify release tag points to event commit
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: |
+          head_commit="$(git rev-parse 'HEAD^{commit}')"
+          tag_commit="$(git rev-parse 'refs/tags/v0.1.0^{commit}')"
+          if [ "$head_commit" != "$EXPECTED_COMMIT" ] || [ "$tag_commit" != "$EXPECTED_COMMIT" ]; then
+            echo "Release tag and event commit do not match" >&2
+            exit 1
+          fi
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install build frontend
+        run: python -m pip install build==1.5.0
+      - name: Build distributions
+        run: python -m build
+      - name: Verify release artifacts
+        run: python scripts/verify_release_artifacts.py dist
+      - name: Verify clean wheel installation
+        run: |
+          python -m venv release-venv
+          release-venv/bin/python -m pip install --no-deps dist/trueheart_core-0.1.0-py3-none-any.whl
+          release-venv/bin/python -m pip check
+          output="$(release-venv/bin/python examples/basic_memory.py)"
+          test "$output" = "1 governed memory recalled at clarity 1.00"
+          printf '%s\n' "$output"
+      - name: Upload verified artifact bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-artifacts
+          path: |
+            dist/trueheart_core-0.1.0-py3-none-any.whl
+            dist/trueheart_core-0.1.0.tar.gz
+            SHA256SUMS
+          if-no-files-found: error
+
+  github-release:
+    name: Upload GitHub Release assets
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified artifact bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-artifacts
+      - name: Upload assets to existing release
+        # Partial-publication recovery is fail-loud: verify the existing asset hashes before rerunning only failed jobs.
+        # Never add --clobber without separately reviewing the published hashes.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: >-
+          gh release upload "$RELEASE_TAG"
+          dist/trueheart_core-0.1.0-py3-none-any.whl
+          dist/trueheart_core-0.1.0.tar.gz
+          SHA256SUMS
+          --repo "$GITHUB_REPOSITORY"
+
+  pypi:
+    name: Publish distributions to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - name: Download verified artifact bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-artifacts
+      - name: Publish distributions with Trusted Publishing
+        # PyPI files are immutable; verify published hashes before rerunning only a failed publication job.
+        # Never enable skip-existing for the production release.
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist

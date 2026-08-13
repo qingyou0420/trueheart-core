@@ -178,7 +178,7 @@ def test_packaging_uses_pep_639_license_metadata() -> None:
     with (PROJECT_ROOT / "pyproject.toml").open("rb") as pyproject_file:
         pyproject = tomllib.load(pyproject_file)
 
-    assert pyproject["build-system"]["requires"] == ["setuptools>=77"]
+    assert pyproject["build-system"]["requires"] == ["setuptools==84.0.0"]
     assert pyproject["project"]["license"] == "MIT"
     assert pyproject["project"]["license-files"] == ["LICENSE"]
     assert pyproject["project"]["dependencies"] == []
