@@ -32,6 +32,7 @@ from .errors import (
     EntityNotFound,
     IdempotencyConflict,
     InvalidTransition,
+    RepositoryBusy,
     RepositoryCorruption,
     ScopeMismatch,
     TrustEscalation,
@@ -209,6 +210,21 @@ _SCHEMA_STATEMENTS = tuple(
 _WAL_RETRY_ATTEMPTS = 30
 _WAL_RETRY_INITIAL_SECONDS = 0.002
 _WAL_RETRY_MAX_SECONDS = 0.05
+_BUSY_TIMEOUT_MILLISECONDS = 5000
+
+
+def _sqlite_error_is_busy_or_locked(error: sqlite3.Error) -> bool:
+    error_code = getattr(error, "sqlite_errorcode", None)
+    base_error_code = error_code & 0xFF if isinstance(error_code, int) else None
+    return base_error_code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+
+
+def _translated_repository_error(
+    error: sqlite3.Error, diagnostic: str
+) -> RepositoryBusy | RepositoryCorruption:
+    if _sqlite_error_is_busy_or_locked(error):
+        return RepositoryBusy(diagnostic)
+    return RepositoryCorruption(diagnostic)
 
 
 def _datetime_text(value: datetime) -> str:
@@ -240,11 +256,13 @@ class SQLiteRepository:
             self._enable_wal(connection)
             try:
                 self._verify_json_support(connection)
-            except sqlite3.Error:
-                raise RepositoryCorruption("SQLite JSON support unavailable") from None
-            connection.execute("PRAGMA busy_timeout = 5000")
+            except sqlite3.Error as error:
+                raise _translated_repository_error(
+                    error, "SQLite JSON support unavailable"
+                ) from None
+            connection.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MILLISECONDS}")
             return connection
-        except (RepositoryCorruption, sqlite3.Error):
+        except (RepositoryBusy, RepositoryCorruption, sqlite3.Error):
             connection.close()
             raise
 
@@ -261,14 +279,7 @@ class SQLiteRepository:
             try:
                 row = connection.execute("PRAGMA journal_mode = WAL").fetchone()
             except sqlite3.OperationalError as error:
-                error_code = getattr(error, "sqlite_errorcode", None)
-                base_error_code = (
-                    error_code & 0xFF if isinstance(error_code, int) else None
-                )
-                retryable = base_error_code in (
-                    sqlite3.SQLITE_BUSY,
-                    sqlite3.SQLITE_LOCKED,
-                )
+                retryable = _sqlite_error_is_busy_or_locked(error)
                 if not retryable or attempt + 1 == _WAL_RETRY_ATTEMPTS:
                     raise
                 time.sleep(delay)
@@ -297,14 +308,16 @@ class SQLiteRepository:
                 (SCHEMA_VERSION, _datetime_text(datetime.now(UTC))),
             )
             connection.commit()
-        except RepositoryCorruption:
+        except (RepositoryBusy, RepositoryCorruption):
             if connection is not None:
                 self._rollback_quietly(connection)
             raise
-        except sqlite3.Error:
+        except sqlite3.Error as error:
             if connection is not None:
                 self._rollback_quietly(connection)
-            raise RepositoryCorruption("schema initialization failed") from None
+            raise _translated_repository_error(
+                error, "schema initialization failed"
+            ) from None
         finally:
             if connection is not None:
                 connection.close()
@@ -521,14 +534,19 @@ class SQLiteRepository:
             receipt = self._receipt(row)
             connection.commit()
             return receipt
-        except (EntityDeleted, IdempotencyConflict, RepositoryCorruption):
+        except (
+            EntityDeleted,
+            IdempotencyConflict,
+            RepositoryBusy,
+            RepositoryCorruption,
+        ):
             if connection is not None:
                 self._rollback_quietly(connection)
             raise
-        except sqlite3.Error:
+        except sqlite3.Error as error:
             if connection is not None:
                 self._rollback_quietly(connection)
-            raise RepositoryCorruption("event ingest failed") from None
+            raise _translated_repository_error(error, "event ingest failed") from None
         except BaseException:
             if connection is not None:
                 self._rollback_quietly(connection)
@@ -727,6 +745,7 @@ class SQLiteRepository:
             EntityDeleted,
             EntityNotFound,
             IdempotencyConflict,
+            RepositoryBusy,
             RepositoryCorruption,
             ScopeMismatch,
             TrustEscalation,
@@ -734,10 +753,12 @@ class SQLiteRepository:
             if connection is not None:
                 self._rollback_quietly(connection)
             raise
-        except sqlite3.Error:
+        except sqlite3.Error as error:
             if connection is not None:
                 self._rollback_quietly(connection)
-            raise RepositoryCorruption("memory materialization failed") from None
+            raise _translated_repository_error(
+                error, "memory materialization failed"
+            ) from None
         except BaseException:
             if connection is not None:
                 self._rollback_quietly(connection)
@@ -947,14 +968,14 @@ class SQLiteRepository:
             )
             connection.commit()
             return eligible
-        except RepositoryCorruption:
+        except (RepositoryBusy, RepositoryCorruption):
             if connection is not None:
                 self._rollback_quietly(connection)
             raise
-        except sqlite3.Error:
+        except sqlite3.Error as error:
             if connection is not None:
                 self._rollback_quietly(connection)
-            raise RepositoryCorruption("memory recall failed") from None
+            raise _translated_repository_error(error, "memory recall failed") from None
         except BaseException:
             if connection is not None:
                 self._rollback_quietly(connection)
@@ -1015,14 +1036,16 @@ class SQLiteRepository:
                 )
             connection.commit()
             return len(eligible)
-        except RepositoryCorruption:
+        except (RepositoryBusy, RepositoryCorruption):
             if connection is not None:
                 self._rollback_quietly(connection)
             raise
-        except sqlite3.Error:
+        except sqlite3.Error as error:
             if connection is not None:
                 self._rollback_quietly(connection)
-            raise RepositoryCorruption("raw content expiry failed") from None
+            raise _translated_repository_error(
+                error, "raw content expiry failed"
+            ) from None
         except BaseException:
             if connection is not None:
                 self._rollback_quietly(connection)
@@ -1051,16 +1074,19 @@ class SQLiteRepository:
             EntityDeleted,
             EntityNotFound,
             InvalidTransition,
+            RepositoryBusy,
             RepositoryCorruption,
             ScopeMismatch,
         ):
             if connection is not None:
                 self._rollback_quietly(connection)
             raise
-        except sqlite3.Error:
+        except sqlite3.Error as error:
             if connection is not None:
                 self._rollback_quietly(connection)
-            raise RepositoryCorruption("governance transaction failed") from None
+            raise _translated_repository_error(
+                error, "governance transaction failed"
+            ) from None
         except BaseException:
             if connection is not None:
                 self._rollback_quietly(connection)
@@ -1087,14 +1113,14 @@ class SQLiteRepository:
             records.sort(key=lambda record: record.occurred_at, reverse=True)
             connection.commit()
             return tuple(records[:limit])
-        except RepositoryCorruption:
+        except (RepositoryBusy, RepositoryCorruption):
             if connection is not None:
                 self._rollback_quietly(connection)
             raise
-        except sqlite3.Error:
+        except sqlite3.Error as error:
             if connection is not None:
                 self._rollback_quietly(connection)
-            raise RepositoryCorruption("audit read failed") from None
+            raise _translated_repository_error(error, "audit read failed") from None
         except BaseException:
             if connection is not None:
                 self._rollback_quietly(connection)
