@@ -1,6 +1,7 @@
 import subprocess
 import sys
 import tomllib
+from importlib.metadata import version
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ import pytest
 import trueheart_core
 from examples.basic_memory import main as run_basic_example
 from trueheart_core import (
+    __version__,
     AuditRecord,
     EntityDeleted,
     EntityNotFound,
@@ -41,6 +43,7 @@ from trueheart_core import (
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_STDOUT = "1 governed memory recalled at clarity 1.00\n"
 PUBLIC_NAMES = (
+    "__version__",
     "AuditRecord",
     "EntityDeleted",
     "EntityNotFound",
@@ -104,9 +107,20 @@ PUBLIC_SYMBOLS = {
 
 def test_public_api_exports_only_supported_symbols() -> None:
     assert tuple(trueheart_core.__all__) == PUBLIC_NAMES
-    assert {getattr(trueheart_core, name) for name in trueheart_core.__all__} == (
-        PUBLIC_SYMBOLS
-    )
+    assert {
+        getattr(trueheart_core, name)
+        for name in trueheart_core.__all__
+        if name != "__version__"
+    } == PUBLIC_SYMBOLS
+
+
+def test_public_version_matches_installed_package_metadata() -> None:
+    with (PROJECT_ROOT / "pyproject.toml").open("rb") as pyproject_file:
+        declared = tomllib.load(pyproject_file)["project"]["version"]
+
+    assert __version__ == declared
+    assert trueheart_core.__version__ == version("trueheart-core")
+    assert trueheart_core.__version__ == declared
 
 
 def test_basic_example_cleanup_is_observable(
@@ -170,7 +184,7 @@ def test_readme_five_minute_example_starts_from_a_checkout() -> None:
 
     positions = tuple(section.index(command) for command in commands)
     assert positions == tuple(sorted(positions))
-    assert "trueheart-core==0.1.1" not in section
+    assert "trueheart-core==0.1.2" not in section
 
 
 def test_code_of_conduct_defines_private_route_and_original_provenance() -> None:
@@ -195,7 +209,7 @@ def test_security_guarantees_starts_with_its_introduction() -> None:
     )
     introduction = security_guarantees.splitlines()[2]
 
-    assert introduction.startswith("This document describes TrueHeart Core 0.1.1")
+    assert introduction.startswith("This document describes TrueHeart Core 0.1.2")
 
 
 def test_packaging_uses_pep_639_license_metadata() -> None:
@@ -206,4 +220,4 @@ def test_packaging_uses_pep_639_license_metadata() -> None:
     assert pyproject["project"]["license"] == "MIT"
     assert pyproject["project"]["license-files"] == ["LICENSE"]
     assert pyproject["project"]["dependencies"] == []
-    assert pyproject["project"]["version"] == "0.1.1"
+    assert pyproject["project"]["version"] == "0.1.2"

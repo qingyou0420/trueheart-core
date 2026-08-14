@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TrueHeart Core 0.1.1 is a model-independent Python library for governed
+TrueHeart Core 0.1.2 is a model-independent Python library for governed
 long-term memory in AI agents. It gives a host application explicit contracts
 for ingesting source events, materializing derived memories, deterministic
 recall, retention, lineage, governance, and body-free audit records.
@@ -69,13 +69,13 @@ The high-level API is `TrueHeart`:
   records in that scope. `limit` is 1 through 100 (default 100) with no
   pagination. `occurred_at` is caller-claimed, not write order.
 
-`SQLiteRepository` is the supported adapter. Stable imports also include the
-immutable DTOs and enums (`Scope`, `SourceRef`, `RetentionPolicy`,
-`RawEventDraft`, `RawEventReceipt`, `MemoryDraft`, `MemoryRecord`,
-`MemoryStatus`, `RecallQuery`, `RecallItem`, `GovernanceCommand`,
-`GovernanceAction`, `GovernanceResult`, `EntityType`, `AuditRecord`, and
-`TrustLevel`) and the documented `TrueHeartError` subclasses
-(`ValidationError`, `EntityNotFound`, `ScopeMismatch`,
+`SQLiteRepository` is the supported adapter. Stable imports also include
+`__version__` (from installed package metadata), the immutable DTOs and enums
+(`Scope`, `SourceRef`, `RetentionPolicy`, `RawEventDraft`, `RawEventReceipt`,
+`MemoryDraft`, `MemoryRecord`, `MemoryStatus`, `RecallQuery`, `RecallItem`,
+`GovernanceCommand`, `GovernanceAction`, `GovernanceResult`, `EntityType`,
+`AuditRecord`, and `TrustLevel`) and the documented `TrueHeartError`
+subclasses (`ValidationError`, `EntityNotFound`, `ScopeMismatch`,
 `IdempotencyConflict`, `EntityDeleted`, `InvalidTransition`,
 `TrustEscalation`, `RepositoryBusy`, and `RepositoryCorruption`).
 Transient SQLite write-lock contention raises `RepositoryBusy` so a host
@@ -95,11 +95,11 @@ transaction. Forgetting a memory does not delete its source events.
 
 ## Installation
 
-TrueHeart Core 0.1.1 is available from
-[PyPI](https://pypi.org/project/trueheart-core/0.1.1/):
+TrueHeart Core 0.1.2 is available from
+[PyPI](https://pypi.org/project/trueheart-core/0.1.2/):
 
 ```console
-python -m pip install trueheart-core==0.1.1
+python -m pip install trueheart-core==0.1.2
 ```
 
 For development from a checkout:
@@ -164,9 +164,13 @@ before using the library with sensitive data.
 ## Architecture
 
 Immutable domain contracts feed the `TrueHeart` lifecycle service, which uses
-an internal repository boundary implemented by `SQLiteRepository`. Policy and
-validation live in the domain/service layer; persistence, transactions, and
-projection assembly live in the adapter. See the
+an internal repository boundary implemented by `SQLiteRepository`. Input
+validation lives in the domain layer. Content hashes, dependency fingerprints,
+and recall clarity live in the service. Lifecycle policy, integrity checks,
+trust ceiling, retention derivation, idempotency compare, tombstone semantics,
+and audit policy currently live in the SQLite adapter, which must pass the
+same contract tests as any future adapter. Persistence, transactions, and
+projection assembly also live in the adapter. See the
 [architecture](https://github.com/qingyou0420/trueheart-core/blob/main/docs/architecture.md).
 
 ## Development
@@ -192,7 +196,7 @@ and report vulnerabilities privately as described in
 
 ## Status
 
-Version 0.1.1 is published on PyPI from this public source repository and keeps
+Version 0.1.2 is published on PyPI from this public source repository and keeps
 an intentionally small API. A point-in-time
 [code review of 0.1.0 (in Chinese)](https://github.com/qingyou0420/trueheart-core/blob/main/docs/reviews/2026-08-13-v0.1.0-code-review.md)
 covers `main` at commit `bda22c7`; it is a snapshot, not a living guarantee. Semantic search, embeddings, model integration,

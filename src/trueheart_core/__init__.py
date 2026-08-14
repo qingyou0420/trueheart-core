@@ -1,5 +1,7 @@
 """Public contracts for governed long-term memory."""
 
+from importlib.metadata import version
+
 from .domain import (
     AuditRecord,
     EntityType,
@@ -33,7 +35,10 @@ from .errors import (
 from .service import TrueHeart
 from .sqlite import SQLiteRepository
 
+__version__ = version("trueheart-core")
+
 __all__ = [
+    "__version__",
     "AuditRecord",
     "EntityDeleted",
     "EntityNotFound",

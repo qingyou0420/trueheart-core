@@ -30,6 +30,16 @@ class _TypeErrorTimezone(tzinfo):
         return None
 
 
+class _RuntimeErrorTimezone(tzinfo):
+    def utcoffset(self, dt: datetime | None) -> timedelta | None:
+        del dt
+        raise RuntimeError(TZINFO_SENTINEL)
+
+    def dst(self, dt: datetime | None) -> timedelta | None:
+        del dt
+        return None
+
+
 def test_scope_rejects_blank_or_oversized_components() -> None:
     with pytest.raises(ValidationError, match="tenant_id"):
         Scope(" ", "owner", "subject")
@@ -112,6 +122,22 @@ def test_datetime_normalization_contains_custom_tzinfo_type_error() -> None:
 
     assert TZINFO_SENTINEL not in str(error.value)
     assert error.value.__cause__ is None
+
+
+def test_datetime_normalization_contains_custom_tzinfo_runtime_error() -> None:
+    hostile_datetime = datetime(2026, 8, 13, 9, tzinfo=_RuntimeErrorTimezone())
+
+    with pytest.raises(ValidationError, match="occurred_at") as error:
+        SourceRef(
+            source_id="source",
+            source_type="test",
+            occurred_at=hostile_datetime,
+            trust=TrustLevel.UNTRUSTED,
+        )
+
+    assert TZINFO_SENTINEL not in str(error.value)
+    assert error.value.__cause__ is None
+    assert "PRIVATE" not in str(error.value)
 
 
 @pytest.mark.parametrize(

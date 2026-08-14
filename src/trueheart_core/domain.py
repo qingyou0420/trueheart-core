@@ -62,7 +62,7 @@ def _normalize_datetime(value: datetime, field_name: str) -> datetime:
     try:
         offset = value.utcoffset()
         normalized = value.astimezone(UTC)
-    except (OSError, OverflowError, TypeError, ValueError):
+    except (OSError, OverflowError, RuntimeError, TypeError, ValueError):
         raise ValidationError(field_name, "must be a representable datetime") from None
     if offset is None:
         raise ValidationError(field_name, "must be timezone-aware")
