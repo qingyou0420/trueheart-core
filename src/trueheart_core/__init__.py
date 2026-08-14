@@ -38,7 +38,6 @@ from .sqlite import SQLiteRepository
 __version__ = version("trueheart-core")
 
 __all__ = [
-    "__version__",
     "AuditRecord",
     "EntityDeleted",
     "EntityNotFound",
@@ -67,4 +66,5 @@ __all__ = [
     "TrustEscalation",
     "TrustLevel",
     "ValidationError",
+    "__version__",
 ]

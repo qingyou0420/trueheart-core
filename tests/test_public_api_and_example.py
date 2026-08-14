@@ -9,7 +9,6 @@ import pytest
 import trueheart_core
 from examples.basic_memory import main as run_basic_example
 from trueheart_core import (
-    __version__,
     AuditRecord,
     EntityDeleted,
     EntityNotFound,
@@ -38,12 +37,12 @@ from trueheart_core import (
     TrustEscalation,
     TrustLevel,
     ValidationError,
+    __version__,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_STDOUT = "1 governed memory recalled at clarity 1.00\n"
 PUBLIC_NAMES = (
-    "__version__",
     "AuditRecord",
     "EntityDeleted",
     "EntityNotFound",
@@ -72,6 +71,7 @@ PUBLIC_NAMES = (
     "TrustEscalation",
     "TrustLevel",
     "ValidationError",
+    "__version__",
 )
 PUBLIC_SYMBOLS = {
     AuditRecord,
