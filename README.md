@@ -65,7 +65,9 @@ The high-level API is `TrueHeart`:
 - `recall(RecallQuery)` returns an immutable tuple of `RecallItem` values.
 - `govern(GovernanceCommand)` seals, restores, forgets, or deletes.
 - `expire_raw_content(as_of=...)` removes eligible raw bodies.
-- `audit(scope, limit=...)` returns body-free lifecycle records.
+- `audit(scope, limit=...)` returns the newest body-free lifecycle
+  records in that scope. `limit` is 1 through 100 (default 100) with no
+  pagination. `occurred_at` is caller-claimed, not write order.
 
 `SQLiteRepository` is the supported adapter. Stable imports also include the
 immutable DTOs and enums (`Scope`, `SourceRef`, `RetentionPolicy`,
@@ -138,6 +140,18 @@ Metadata is limited to 64 JSON container levels, integer magnitude of at most
 4096 bits, and 16 KiB after canonical serialization. The SQLite adapter checks
 for the standard `json_valid` function when it opens a connection and fails
 closed if that required capability is unavailable.
+
+Read paths validate persisted rows before they filter or truncate. Any corrupt
+memory or lineage row in a scope makes that scope's `recall` unavailable. Any
+tenant's corrupt raw-event row makes whole-database `expire_raw_content`
+unavailable. `audit` likewise validates every audit row in the requested scope
+before returning the newest `limit` records.
+
+`audit` timestamps are caller-claimed: materialize uses `MemoryDraft.created_at`,
+governance uses `GovernanceCommand.occurred_at`, expire uses the supplied
+`as_of`, and ingest uses the service clock. Same-timestamp records are ordered
+by random `uuid4` `audit_id`. The API proves that listed lifecycle actions
+occurred; it does not provide a reliable total order.
 
 Read the
 [security guarantees](https://github.com/qingyou0420/trueheart-core/blob/main/docs/security-guarantees.md),
