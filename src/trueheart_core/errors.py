@@ -54,6 +54,13 @@ class TrustEscalation(TrueHeartError):
         super().__init__(f"trust escalation: {entity_id}")
 
 
+class RepositoryBusy(TrueHeartError):
+    """The repository is temporarily locked by another writer."""
+
+    def __init__(self, diagnostic: str) -> None:
+        super().__init__(f"repository busy: {diagnostic}")
+
+
 class RepositoryCorruption(TrueHeartError):
     """The repository violated a fixed integrity diagnostic."""
 

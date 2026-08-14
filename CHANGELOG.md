@@ -8,6 +8,9 @@ All notable changes to TrueHeart Core are documented here.
 
 - PEP 561 `py.typed` marker so installed wheels and sdists expose public
   contracts to downstream type checkers.
+- Public `RepositoryBusy` for transient SQLite write-lock contention
+  (`SQLITE_BUSY` / `SQLITE_LOCKED`) so hosts can retry instead of treating
+  lock contention as corruption.
 
 ### Changed
 

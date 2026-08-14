@@ -72,7 +72,12 @@ immutable DTOs and enums (`Scope`, `SourceRef`, `RetentionPolicy`,
 `RawEventDraft`, `RawEventReceipt`, `MemoryDraft`, `MemoryRecord`,
 `MemoryStatus`, `RecallQuery`, `RecallItem`, `GovernanceCommand`,
 `GovernanceAction`, `GovernanceResult`, `EntityType`, `AuditRecord`, and
-`TrustLevel`) and the documented `TrueHeartError` subclasses.
+`TrustLevel`) and the documented `TrueHeartError` subclasses
+(`ValidationError`, `EntityNotFound`, `ScopeMismatch`,
+`IdempotencyConflict`, `EntityDeleted`, `InvalidTransition`,
+`TrustEscalation`, `RepositoryBusy`, and `RepositoryCorruption`).
+Transient SQLite write-lock contention raises `RepositoryBusy` so a host
+can retry; integrity failures raise `RepositoryCorruption`.
 
 ## Lifecycle
 

@@ -13,6 +13,7 @@ from trueheart_core import (
     EntityDeleted,
     IdempotencyConflict,
     RawEventDraft,
+    RepositoryBusy,
     RepositoryCorruption,
     RetentionPolicy,
     Scope,
@@ -22,6 +23,7 @@ from trueheart_core import (
     TrustLevel,
     ValidationError,
 )
+from trueheart_core import sqlite as sqlite_adapter
 
 
 class _ProcessStartEvent(Protocol):
@@ -398,6 +400,32 @@ def test_ingest_rechecks_schema_version_inside_write_transaction(
 
     with sqlite3.connect(path) as connection:
         assert connection.execute("SELECT COUNT(*) FROM raw_events").fetchone() == (0,)
+
+
+def test_write_lock_contention_raises_repository_busy_not_corruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sqlite_adapter, "_BUSY_TIMEOUT_MILLISECONDS", 50)
+    path = tmp_path / "write-lock.db"
+    service = _service(path)
+    blocker = sqlite3.connect(path, isolation_level=None)
+    try:
+        blocker.execute("PRAGMA journal_mode = WAL")
+        blocker.execute("BEGIN IMMEDIATE")
+        blocker.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (99, 'x')"
+        )
+        with pytest.raises(RepositoryBusy) as error:
+            service.ingest_event(_draft(content="private-busy-lock-sentinel"))
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+    assert type(error.value) is RepositoryBusy
+    assert not isinstance(error.value, RepositoryCorruption)
+    assert "private-busy-lock-sentinel" not in str(error.value)
+    assert "synthetic message" not in str(error.value)
+    assert error.value.__cause__ is None
 
 
 def test_ingest_translates_sqlite_failure_without_body_or_diagnostic(
