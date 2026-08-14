@@ -2,6 +2,25 @@
 
 All notable changes to TrueHeart Core are documented here.
 
+## [0.1.2] - 2026-08-14
+
+### Added
+
+- Public `__version__`, resolved from installed package metadata so the
+  attribute stays correct after install.
+- Dependabot updates for SHA-pinned GitHub Actions.
+- Python 3.14 on the CI quality matrix.
+
+### Changed
+
+- Hostile `tzinfo` objects that raise `RuntimeError` during datetime
+  normalization now become body-free `ValidationError` instead of leaking
+  the raw exception.
+- Architecture wording now matches the code: input validation in domain;
+  hashes, fingerprints, and clarity in the service; lifecycle policy,
+  integrity checks, trust ceiling, retention derivation, idempotency,
+  tombstones, and audit policy currently in the SQLite adapter.
+
 ## [0.1.1] - 2026-08-13
 
 ### Added

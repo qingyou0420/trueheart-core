@@ -31,7 +31,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          if [ "$RELEASE_TAG" != "v0.1.1" ]; then
+          if [ "$RELEASE_TAG" != "v0.1.2" ]; then
             echo "Refusing unexpected release tag: $RELEASE_TAG" >&2
             exit 1
           fi
@@ -46,7 +46,7 @@ jobs:
           EXPECTED_COMMIT: ${{ github.sha }}
         run: |
           head_commit="$(git rev-parse 'HEAD^{commit}')"
-          tag_commit="$(git rev-parse 'refs/tags/v0.1.1^{commit}')"
+          tag_commit="$(git rev-parse 'refs/tags/v0.1.2^{commit}')"
           if [ "$head_commit" != "$EXPECTED_COMMIT" ] || [ "$tag_commit" != "$EXPECTED_COMMIT" ]; then
             echo "Release tag and event commit do not match" >&2
             exit 1
@@ -65,7 +65,7 @@ jobs:
       - name: Verify clean wheel installation
         run: |
           python -m venv release-venv
-          release-venv/bin/python -m pip install --no-deps dist/trueheart_core-0.1.1-py3-none-any.whl
+          release-venv/bin/python -m pip install --no-deps dist/trueheart_core-0.1.2-py3-none-any.whl
           release-venv/bin/python -m pip check
           output="$(release-venv/bin/python examples/basic_memory.py)"
           test "$output" = "1 governed memory recalled at clarity 1.00"
@@ -75,8 +75,8 @@ jobs:
         with:
           name: release-artifacts
           path: |
-            dist/trueheart_core-0.1.1-py3-none-any.whl
-            dist/trueheart_core-0.1.1.tar.gz
+            dist/trueheart_core-0.1.2-py3-none-any.whl
+            dist/trueheart_core-0.1.2.tar.gz
             SHA256SUMS
           if-no-files-found: error
 
@@ -100,8 +100,8 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: >-
           gh release upload "$RELEASE_TAG"
-          dist/trueheart_core-0.1.1-py3-none-any.whl
-          dist/trueheart_core-0.1.1.tar.gz
+          dist/trueheart_core-0.1.2-py3-none-any.whl
+          dist/trueheart_core-0.1.2.tar.gz
           SHA256SUMS
           --repo "$GITHUB_REPOSITORY"
 

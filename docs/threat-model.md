@@ -1,6 +1,6 @@
 # Threat model
 
-TrueHeart Core 0.1.1 assumes event bodies, derived memory bodies, metadata,
+TrueHeart Core 0.1.2 assumes event bodies, derived memory bodies, metadata,
 identifiers, and contributions are untrusted. The local host and administrator
 are outside the trusted computing boundary. “Owner” below names the party
 responsible for the remaining decision or operation.

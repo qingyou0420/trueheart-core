@@ -1,6 +1,6 @@
 # Architecture
 
-TrueHeart Core 0.1.0 is a synchronous Python library with three layers.
+TrueHeart Core 0.1.2 is a synchronous Python library with three layers.
 
 ## Domain contracts
 
@@ -11,9 +11,9 @@ metadata, retention relationships, and typed trust and lifecycle values.
 ## Lifecycle service
 
 `TrueHeart` is the high-level entry point. It calculates content hashes,
-dependency fingerprints, lifecycle dates, and deterministic recall clarity. It
-does not create memories: the host supplies each `MemoryDraft` and its source
-event IDs. It also does not schedule expiry; the host calls
+dependency fingerprints, raw-expiry timestamps, and deterministic recall
+clarity. It does not create memories: the host supplies each `MemoryDraft` and
+its source event IDs. It also does not schedule expiry; the host calls
 `expire_raw_content` with a timezone-aware `as_of` value.
 
 Recall ordering is stable: clarity descending, creation time descending, then
@@ -22,10 +22,16 @@ query time without embeddings or network calls.
 
 ## Repository boundary and SQLite
 
-An internal repository protocol separates policy from persistence. It is not a
-stable public import in 0.1. `SQLiteRepository` is the supported adapter. It
-uses one connection per transaction, a fixed schema, parameterized SQL, foreign
-keys, and WAL mode for file-backed databases.
+The internal `Repository` protocol is an operation-level boundary (ingest,
+materialize, recall, expire, govern, audit), not a persistence-primitive
+layer. It is not a stable public import in 0.1. `SQLiteRepository` is the
+supported adapter. In 0.1.x, lifecycle policy, integrity checks, trust
+ceiling, retention derivation, idempotency compare, tombstone semantics, and
+audit policy are implemented inside that adapter. A second adapter would
+reimplement those policies and must pass the same contract tests. The adapter
+also owns persistence, transactions, and projection assembly. It uses one
+connection per transaction, a fixed schema, parameterized SQL, foreign keys,
+and WAL mode for file-backed databases.
 
 The schema separates raw bodies from receipts. `raw_event_content` holds the
 raw plaintext body, while receipt, provenance, hash, lifecycle, and lineage

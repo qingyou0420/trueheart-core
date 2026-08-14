@@ -1,4 +1,4 @@
-"""Verify the exact TrueHeart Core v0.1.1 release distributions."""
+"""Verify the exact TrueHeart Core v0.1.2 release distributions."""
 
 from __future__ import annotations
 
@@ -16,10 +16,10 @@ from email.parser import BytesParser
 from email.policy import default
 from pathlib import Path
 
-WHEEL_NAME = "trueheart_core-0.1.1-py3-none-any.whl"
-SDIST_NAME = "trueheart_core-0.1.1.tar.gz"
+WHEEL_NAME = "trueheart_core-0.1.2-py3-none-any.whl"
+SDIST_NAME = "trueheart_core-0.1.2.tar.gz"
 EXPECTED_FILES = {WHEEL_NAME, SDIST_NAME}
-SDIST_ROOT = "trueheart_core-0.1.1"
+SDIST_ROOT = "trueheart_core-0.1.2"
 ALLOWED_REQUIRES_DIST = (
     'build<2,>=1.2; extra == "dev"',
     'mypy<2,>=1.15; extra == "dev"',
@@ -62,7 +62,7 @@ def _verify_metadata(metadata_bytes: bytes, source: str) -> None:
     metadata: Message = BytesParser(policy=default).parsebytes(metadata_bytes)
     expected = {
         "Name": "trueheart-core",
-        "Version": "0.1.1",
+        "Version": "0.1.2",
         "Requires-Python": ">=3.11",
         "License-Expression": "MIT",
     }
@@ -143,7 +143,7 @@ def _wheel_record_hash(content: bytes) -> str:
 
 
 def _verify_wheel(wheel_path: Path) -> None:
-    dist_info = "trueheart_core-0.1.1.dist-info"
+    dist_info = "trueheart_core-0.1.2.dist-info"
     metadata_name = f"{dist_info}/METADATA"
     record_name = f"{dist_info}/RECORD"
 

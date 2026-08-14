@@ -1,6 +1,6 @@
 # Security guarantees and boundaries
 
-This document describes TrueHeart Core 0.1.1. Guarantees apply to operations
+This document describes TrueHeart Core 0.1.2. Guarantees apply to operations
 performed through the library against the SQLite database it controls.
 
 ## Enforced by the core
