@@ -17,6 +17,12 @@ All notable changes to TrueHeart Core are documented here.
 - Scope guarantee wording now matches the API: public operations that act on
   scoped data require exact `Scope`; `expire_raw_content` is a whole-database
   maintenance operation that only expires eligible raw bodies by `as_of`.
+- Documented read-path availability: a corrupt row in a scope makes that
+  scope's recall unavailable; a corrupt row in any tenant makes
+  whole-database `expire_raw_content` unavailable.
+- Documented that `audit` timestamps are caller-claimed, the public API
+  returns only the newest `limit` records (maximum 100), and the
+  projection proves occurrence rather than a reliable total order.
 
 ## [0.1.0] - 2026-08-13
 

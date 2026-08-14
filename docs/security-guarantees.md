@@ -47,6 +47,36 @@ Body-free means audit rows and tombstones omit event and memory bodies. IDs,
 scope components, reasons, timestamps, provenance, and metadata can still be
 sensitive and require host-appropriate handling.
 
+Read paths validate persisted rows before they filter or truncate. This is
+intentional: recall must detect a corrupt status or deadline even when that
+row would not be returned.
+
+- `recall` loads every memory and every `memory_sources` edge in the requested
+  scope, validates each row, then filters in the library. Any one corrupt row
+  makes that scope's recall unavailable.
+- `expire_raw_content` scans every raw-event receipt in the database with no
+  tenant filter, validates each receipt, then expires eligible bodies. Any one
+  tenant's corrupt row makes whole-database expiry unavailable.
+- `audit` loads every audit row in the requested scope, validates each row,
+  then sorts and truncates in the library. Any one corrupt audit row makes
+  that scope's audit unavailable.
+
+These operations therefore have a residual denial-of-service surface: local
+tampering or a single bad row can fail-close an entire scope or, for expiry,
+the entire database. Hosts that need availability despite a bad row must
+repair or isolate the database; the library does not skip corrupt rows.
+
+The public `audit` method returns at most `limit` records (default and
+maximum 100) and has no pagination token or time-range filter. Older rows
+remain in SQLite but are not reachable through the public API.
+`occurred_at` is caller-claimed, not the adapter write time: materialize
+stores `MemoryDraft.created_at`, governance stores
+`GovernanceCommand.occurred_at`, expire stores the caller-supplied `as_of`,
+and ingest stores the service clock. Records with the same `occurred_at` are
+ordered by `audit_id`, which is a random `uuid4`. The projection can show
+that listed lifecycle actions occurred. It does not provide a reliable total
+order of writes.
+
 ## Operational responsibilities
 
 Hosts should restrict local database and backup access, decide whether they
